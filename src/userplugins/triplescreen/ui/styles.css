@@ -1,0 +1,304 @@
+.triplescreen-root {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    color: var(--text-default, #dbdee1);
+    font-family: var(--font-primary, "gg sans", "Noto Sans", sans-serif);
+}
+
+.triplescreen-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.triplescreen-header h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+.triplescreen-header p {
+    margin: 4px 0 0;
+    color: var(--text-muted, #949ba4);
+    font-size: 13px;
+    line-height: 1.35;
+    max-width: 62ch;
+}
+
+.triplescreen-grid {
+    display: grid;
+    grid-template-columns: 230px minmax(0, 1fr);
+    grid-template-areas:
+        "monitors stage"
+        "side side";
+    gap: 12px;
+    align-items: start;
+    width: 100%;
+    min-width: 0;
+}
+
+.triplescreen-monitors { grid-area: monitors; min-width: 0; }
+.triplescreen-stage { grid-area: stage; min-width: 0; }
+.triplescreen-side {
+    grid-area: side;
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    gap: 12px;
+    min-width: 0;
+}
+
+@media (max-width: 720px) {
+    .triplescreen-grid,
+    .triplescreen-side {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+            "monitors"
+            "stage"
+            "side";
+    }
+}
+
+.triplescreen-panel {
+    background: var(--background-secondary, #2b2d31);
+    border: 1px solid var(--background-modifier-accent, #3f4147);
+    border-radius: 8px;
+    padding: 12px;
+    overflow: visible;
+    min-height: 0;
+}
+
+.triplescreen-panel h3 {
+    margin: 0 0 10px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted, #949ba4);
+}
+
+.triplescreen-monitor-card {
+    display: grid;
+    grid-template-columns: 64px 1fr auto;
+    gap: 8px;
+    align-items: center;
+    padding: 8px;
+    border-radius: 6px;
+    background: var(--background-primary, #1e1f22);
+    margin-bottom: 8px;
+    cursor: pointer;
+    border: 1px solid transparent;
+}
+
+.triplescreen-monitor-card.selected {
+    border-color: #5b8cff;
+}
+
+.triplescreen-monitor-card input {
+    pointer-events: none;
+}
+
+.triplescreen-monitor-card img,
+.triplescreen-monitor-thumb {
+    width: 64px;
+    height: 36px;
+    object-fit: cover;
+    border-radius: 4px;
+    background: #111;
+}
+
+.triplescreen-monitor-meta {
+    min-width: 0;
+}
+
+.triplescreen-monitor-meta strong {
+    display: block;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.triplescreen-monitor-meta span {
+    font-size: 11px;
+    color: var(--text-muted, #949ba4);
+}
+
+.triplescreen-canvas-wrap {
+    position: relative;
+    background:
+        linear-gradient(180deg, rgba(20, 28, 48, 0.9), rgba(10, 14, 24, 0.95)),
+        repeating-linear-gradient(
+            0deg,
+            transparent,
+            transparent 15px,
+            rgba(255, 255, 255, 0.03) 15px,
+            rgba(255, 255, 255, 0.03) 16px
+        ),
+        repeating-linear-gradient(
+            90deg,
+            transparent,
+            transparent 15px,
+            rgba(255, 255, 255, 0.03) 15px,
+            rgba(255, 255, 255, 0.03) 16px
+        );
+    border-radius: 8px;
+    overflow: hidden;
+    height: 220px;
+    touch-action: none;
+}
+
+.triplescreen-canvas-wrap canvas.triplescreen-preview {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    opacity: 0.85;
+}
+
+.triplescreen-rect {
+    position: absolute;
+    border: 2px solid #5b8cff;
+    background: rgba(91, 140, 255, 0.12);
+    box-sizing: border-box;
+    cursor: move;
+    user-select: none;
+}
+
+.triplescreen-rect.selected {
+    border-color: #8fd3ff;
+    box-shadow: 0 0 0 1px rgba(143, 211, 255, 0.35);
+}
+
+.triplescreen-rect .label {
+    position: absolute;
+    left: 6px;
+    top: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #e8f1ff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+}
+
+.triplescreen-handle {
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    background: #fff;
+    border: 1px solid #5b8cff;
+    border-radius: 2px;
+    right: -5px;
+    bottom: -5px;
+    cursor: nwse-resize;
+}
+
+.triplescreen-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.triplescreen-toolbar button,
+.triplescreen-actions button {
+    appearance: none;
+    border: 1px solid var(--background-modifier-accent, #3f4147);
+    background: var(--background-primary, #1e1f22);
+    color: inherit;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.triplescreen-toolbar button:hover,
+.triplescreen-actions button:hover {
+    background: var(--background-modifier-hover, #35373c);
+}
+
+.triplescreen-toolbar button.active {
+    border-color: #5b8cff;
+    color: #8fd3ff;
+}
+
+.triplescreen-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 10px;
+}
+
+.triplescreen-field label {
+    font-size: 11px;
+    color: var(--text-muted, #949ba4);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.triplescreen-field select,
+.triplescreen-field input[type="number"],
+.triplescreen-field input[type="color"],
+.triplescreen-field input[type="text"] {
+    background: var(--background-primary, #1e1f22);
+    border: 1px solid var(--background-modifier-accent, #3f4147);
+    color: inherit;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 13px;
+}
+
+.triplescreen-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
+.triplescreen-actions .primary {
+    background: #5865f2;
+    border-color: #5865f2;
+    color: #fff;
+    font-weight: 600;
+}
+
+.triplescreen-actions .primary:hover {
+    background: #4752c4;
+}
+
+.triplescreen-actions .danger {
+    background: #da373c;
+    border-color: #da373c;
+    color: #fff;
+}
+
+.triplescreen-status {
+    font-size: 12px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--background-primary, #1e1f22);
+}
+
+.triplescreen-status.error {
+    color: #fa777c;
+    border: 1px solid rgba(218, 55, 60, 0.4);
+}
+
+.triplescreen-status.ok {
+    color: #2dc770;
+    border: 1px solid rgba(45, 199, 112, 0.35);
+}
+
+.triplescreen-perf {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text-muted, #949ba4);
+    white-space: pre-wrap;
+}

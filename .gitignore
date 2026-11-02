@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.vite/
+agent-tools/
+.cursor/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+secrets*
+Get-UserADGroups.ps1
+
