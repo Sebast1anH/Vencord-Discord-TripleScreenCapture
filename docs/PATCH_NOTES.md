@@ -4,11 +4,23 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Output window mirrors system audio (no Discord echo)
+
+### Fixed
+- **Silence / wrong audio:** Window go-live had `soundshareId: -1` (no stream audio). Now uses Discord PID soundshare on the Output window.
+- Output mirrors desktop mix via `loopbackWithoutChrome` (YouTube/games, not Discord) into Discord.exe so viewers hear apps.
+- Self-deafen while streaming so call audio is not in process loopback (no self-echo). Undeafen on stop.
+
+### Changed
+- System audio no longer depends on stage screen go-live; the Output window is what Discord shares.
+
+---
+
 ## 2026-11-02 — Park stays on same monitor; bootstrap stream then screen audio
 
 ### Fixed
 - **Minimize jumped to main monitor:** Park now shrinks in-place on the current/stage display (corner), not the primary.
-- **No self-echo and no system audio (silence):** Likely stuck on `window:` with `soundshareId: -1`. Start with a short window go-live so the stream connection exists, then upgrade to stage `screen:` + `soundshareId: 1`, with repair if Discord falls off that state.
+- Earlier screen-bootstrap attempt (superseded by Output audio mirror above).
 
 ### Changed
 - Minimize still switches to window capture before park (avoids blank screen share)
