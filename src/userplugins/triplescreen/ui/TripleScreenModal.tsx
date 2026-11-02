@@ -34,10 +34,9 @@ function statusLabel(status: ReturnType<typeof discordStreamAdapter.getStatus>, 
     if (status.state === "streaming" && status.mode === "preview-only") {
         return "Preview only. Join a voice channel, then press Start composite stream.";
     }
-    if (status.state === "streaming" && status.mode === "stage-screen") {
-        return "Live with system audio. Viewers see the fullscreen stage monitor (composite); Discord voice is excluded.";
+    if (status.state === "streaming") {
+        return "Live. Viewers see the TripleScreen Output window (all selected monitors). System audio uses Discord’s full mix when enabled.";
     }
-    if (status.state === "streaming") return "Live. Viewers see the TripleScreen Output window.";
     return fallback;
 }
 
@@ -162,7 +161,7 @@ function TripleScreenModal({ modalProps }: { modalProps: ModalProps; }) {
                 <div className="triplescreen-header" style={{ width: "100%" }}>
                     <div>
                         <h2>Share Multiple Monitors</h2>
-                        <p>Select monitors, arrange the layout, then press Start. With system audio, leave one display free as the stage (or primary is used). Closing the output / stage window stops the stream.</p>
+                        <p>Select every monitor you want in the mosaic, arrange the layout, then press Start. Closing the TripleScreen Output window stops the stream.</p>
                     </div>
                     <ModalCloseButton onClick={modalProps.onClose} />
                 </div>

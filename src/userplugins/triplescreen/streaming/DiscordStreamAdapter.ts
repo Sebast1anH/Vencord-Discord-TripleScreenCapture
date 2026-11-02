@@ -25,7 +25,7 @@ export type StreamAdapterStatus =
     | { state: "streaming"; mode: InjectionMode; }
     | { state: "error"; message: string; };
 
-export type InjectionMode = "output-window" | "stage-screen" | "preview-only";
+export type InjectionMode = "output-window" | "preview-only";
 
 type StatusListener = (status: StreamAdapterStatus) => void;
 
@@ -47,9 +47,8 @@ export class DiscordStreamAdapter {
     private canvasHeight = 1080;
     private liveFps = 30;
     private lastLayout: LayoutDefinition | null = null;
-    /** Layout actually sent to the output window (stage monitor excluded when system audio is on). */
+    /** Layout actually sent to the output window. */
     private liveMosaicLayout: LayoutDefinition | null = null;
-    private stageScreenId: string | null = null;
     /** Ignore Discord "no stream" polls until go-live has had time to register. */
     private streamGuardUntil = 0;
     private streamMisses = 0;
@@ -133,11 +132,7 @@ export class DiscordStreamAdapter {
                 return;
             }
 
-            const mode: InjectionMode = !published
-                ? "preview-only"
-                : this.stageScreenId
-                    ? "stage-screen"
-                    : "output-window";
+            const mode: InjectionMode = published ? "output-window" : "preview-only";
             if (!published) {
                 performanceMonitor.setError("Discord did not start the stream. Stay in a voice channel, then press Start again.");
             } else {
@@ -160,19 +155,9 @@ export class DiscordStreamAdapter {
 
     updateLayout(layout: LayoutDefinition) {
         this.lastLayout = layout;
-        const mosaic = this.stageScreenId
-            ? {
-                ...layout,
-                monitors: layout.monitors.map(m =>
-                    m.monitorId === this.stageScreenId
-                        ? { ...m, selected: false, visible: false }
-                        : m
-                )
-            }
-            : layout;
-        this.liveMosaicLayout = mosaic;
+        this.liveMosaicLayout = layout;
         const outputSettings = readOutputSettings();
-        this.compositor?.setLayout(mosaic);
+        this.compositor?.setLayout(layout);
         this.compositor?.setOptions({
             backgroundColor: layout.backgroundColor || outputSettings.backgroundColor,
             backgroundImageDataUrl: outputSettings.backgroundImageDataUrl,
@@ -207,7 +192,6 @@ export class DiscordStreamAdapter {
         if (this.cleaning) return;
         this.cleaning = true;
         this.expectingWindow = false;
-        this.stageScreenId = null;
         this.liveMosaicLayout = null;
         try {
             if (this.layoutTimer) {
@@ -236,50 +220,24 @@ export class DiscordStreamAdapter {
         const native = nativeHelpers();
         if (!native) return false;
 
-        const wantAudio = readOutputSettings().includeSystemAudio !== false && isWindowsPlatform();
-        const selectedIds = layout.monitors.filter(m => m.visible && m.selected).map(m => m.monitorId);
-        const stage = wantAudio ? await pickStageScreen(native, selectedIds) : null;
-        // Exclude the stage monitor from the mosaic so screen-capture of the stage
-        // does not recursively include the composite of itself.
-        const mosaicLayout = stage
-            ? {
-                ...layout,
-                monitors: layout.monitors.map(m =>
-                    m.monitorId === stage.screenId
-                        ? { ...m, selected: false, visible: false }
-                        : m
-                )
-            }
-            : layout;
-        const mosaicCount = mosaicLayout.monitors.filter(m => m.visible && m.selected).length;
-        const effectiveStage = mosaicCount > 0 ? stage : null;
-        if (wantAudio && !effectiveStage) {
-            logger.warn("No spare/stage monitor for system audio — falling back to window share (video only)");
-        } else if (effectiveStage && selectedIds.includes(effectiveStage.screenId)) {
-            logger.info(
-                `Stage monitor ${effectiveStage.screenId} hosts the fullscreen composite (excluded from mosaic for system audio)`
-            );
-        }
+        // Always share the Output *window* so every selected monitor stays in the mosaic.
+        // System audio is pinned via setSoundshareSource(0|1) after go-live — no stage monitor.
+        this.liveMosaicLayout = layout;
 
-        this.stageScreenId = effectiveStage?.screenId ?? null;
-        this.liveMosaicLayout = mosaicLayout;
-
-        const opened = await native.openOutputWindow(width, height, fps, {
-            stageScreenId: effectiveStage?.screenId ?? null
-        });
+        const opened = await native.openOutputWindow(width, height, fps);
         if (gen !== this.generation) return "closed" as const;
 
         this.expectingWindow = true;
         this.watchOutputWindow();
 
-        const startedCapture = await native.configureOutput(this.outputPayload(mosaicLayout));
+        const startedCapture = await native.configureOutput(this.outputPayload(layout));
         if (gen !== this.generation) return "closed" as const;
 
         if (!startedCapture?.videos) {
             const message = startedCapture?.errors?.join("; ") || "The output window could not capture the monitors.";
             logger.error("Output window capture failed", message);
             performanceMonitor.setError(message);
-            for (const item of mosaicLayout.monitors.filter(m => m.visible && m.selected)) {
+            for (const item of layout.monitors.filter(m => m.visible && m.selected)) {
                 performanceMonitor.setMonitorStatus(item.monitorId, false, "Output capture failed");
             }
             this.expectingWindow = false;
@@ -290,24 +248,22 @@ export class DiscordStreamAdapter {
         if (startedCapture.errors?.length) {
             performanceMonitor.setError(startedCapture.errors.join("; "));
             logger.warn("Some monitors failed to capture", startedCapture.errors.join("; "));
-            for (const item of mosaicLayout.monitors.filter(m => m.visible && m.selected)) {
+            for (const item of layout.monitors.filter(m => m.visible && m.selected)) {
                 const failed = startedCapture.errors.some(err => err.startsWith(item.monitorId + ":"));
                 performanceMonitor.setMonitorStatus(item.monitorId, !failed, failed ? "Output capture failed" : undefined);
             }
         } else {
             performanceMonitor.setError(undefined);
-            for (const item of mosaicLayout.monitors.filter(m => m.visible && m.selected)) {
+            for (const item of layout.monitors.filter(m => m.visible && m.selected)) {
                 performanceMonitor.setMonitorStatus(item.monitorId, true);
             }
             logger.info(`Output window is drawing ${startedCapture.videos} monitors at ${fps} fps`);
         }
 
         const windowSourceId = opened?.sourceId || await this.waitForOutputSource(native);
-        const goLiveId = (effectiveStage && (opened?.screenSourceId || effectiveStage.screenId))
-            || windowSourceId;
         if (gen !== this.generation || !this.expectingWindow) return "closed" as const;
-        if (!goLiveId) {
-            logger.error("TripleScreen output was not found as a Discord share source");
+        if (!windowSourceId) {
+            logger.error("TripleScreen output window was not found as a Discord share source");
             this.expectingWindow = false;
             this.stopWindowWatch();
             await native.closeOutputWindow();
@@ -319,10 +275,9 @@ export class DiscordStreamAdapter {
             frameRate: fps
         };
         const audio = {
-            includeSystemAudio: !!effectiveStage && wantAudio
+            includeSystemAudio: readOutputSettings().includeSystemAudio !== false && isWindowsPlatform()
         };
-        // Single apply — a delayed second setGoLiveSource was restarting capture and killing the stream.
-        return beginNativeShare(goLiveId, quality, audio);
+        return beginNativeShare(windowSourceId, quality, audio);
     }
 
     private outputPayload(layout: LayoutDefinition) {
@@ -477,40 +432,6 @@ function isWindowsPlatform() {
         || navigator.userAgent.includes("Windows");
 }
 
-type NativeScreenRow = {
-    id: string;
-    name: string;
-    isPrimary: boolean;
-    bounds: { x: number; y: number; width: number; height: number; };
-};
-
-async function pickStageScreen(
-    native: NonNullable<ReturnType<typeof nativeHelpers>>,
-    selectedIds: string[]
-): Promise<{ screenId: string; } | null> {
-    if (!native.listScreens) return null;
-    let screens: NativeScreenRow[] = [];
-    try {
-        screens = await native.listScreens();
-    } catch {
-        return null;
-    }
-    if (!screens.length) return null;
-
-    // Prefer a monitor that is not in the mosaic (true spare display).
-    const unused = screens.filter(s => !selectedIds.includes(s.id));
-    if (unused.length) {
-        const spare = unused.find(s => !s.isPrimary) ?? unused[0];
-        return { screenId: spare.id };
-    }
-    // Need at least two displays so one can host the composite fullscreen.
-    if (screens.length < 2) return null;
-    const steal = screens.find(s => s.isPrimary && selectedIds.includes(s.id))
-        ?? screens.find(s => selectedIds.includes(s.id))
-        ?? screens[0];
-    return steal ? { screenId: steal.id } : null;
-}
-
 function nativeHelpers() {
     const native = (globalThis as typeof globalThis & {
         VencordNative?: {
@@ -532,7 +453,12 @@ function nativeHelpers() {
                     isOutputWindowOpen: () => Promise<boolean>;
                     getOutputSourceId: () => Promise<string | null>;
                     closeOutputWindow: () => Promise<boolean>;
-                    listScreens?: () => Promise<NativeScreenRow[]>;
+                    listScreens?: () => Promise<Array<{
+                        id: string;
+                        name: string;
+                        isPrimary: boolean;
+                        bounds: { x: number; y: number; width: number; height: number; };
+                    }>>;
                 };
             };
         };

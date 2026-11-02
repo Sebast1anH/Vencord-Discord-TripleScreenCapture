@@ -96,9 +96,8 @@ export default definePlugin({
                 TripleScreen composites selected displays into one Discord Go Live stream. Viewers do not need the plugin.
             </span>
             <span>
-                System audio (Windows) fullscreens the composite on a stage monitor and uses Discord&apos;s
-                Entire Screen soundshare path so friends hear your apps, not Discord call echo. Leave one
-                display unselected when possible.
+                System audio (Windows) pins Discord&apos;s full desktop mix after go-live so you can include every
+                selected monitor in the mosaic without sacrificing a stage display.
             </span>
             <span>
                 Open Discord&apos;s Screen Share picker → TripleScreen tab, a voice-channel menu, the Vencord toolbox, or /triplescreen.

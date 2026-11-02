@@ -4,6 +4,18 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — All monitors + system audio (no stage)
+
+### Changed
+- Removed the system-audio **stage monitor** requirement — you can select and stream every display again
+- Go-live always uses the TripleScreen Output **window** for video (full mosaic)
+- System audio is pinned with `setSoundshareSource(0)` (fallback `1`) to clear Discord.exe PID loopback, same approach as enhanced screenshare “Entire System”
+
+### Fixed
+- Main/primary monitor dropped from the mosaic whenever system audio stole it as the stage
+
+---
+
 ## 2026-11-02 — Custom background image
 
 ### Added

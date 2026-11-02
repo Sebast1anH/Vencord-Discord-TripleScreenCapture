@@ -207,9 +207,9 @@ export function OutputSettingsPanel({ value, onChange }: Props) {
             </div>
 
             <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
-                Custom background images fill empty canvas areas behind your monitors (color shows through letterboxing).
-                System audio uses a stage monitor with Discord&apos;s Entire Screen path. Discord still caps video
-                (often 720p without Nitro, 1080p with Nitro).
+                Custom background images fill empty canvas areas behind your monitors. System audio pins Discord&apos;s
+                full desktop mix (not Discord.exe loopback) so you can share every selected display. Discord still caps
+                video (often 720p without Nitro, 1080p with Nitro).
             </p>
         </div>
     );

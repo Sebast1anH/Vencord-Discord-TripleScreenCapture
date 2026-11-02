@@ -111,6 +111,7 @@ export interface DiscordDesktopSource {
     id: string;
     name: string;
     url?: string;
+    display_id?: string;
 }
 
 declare global {
