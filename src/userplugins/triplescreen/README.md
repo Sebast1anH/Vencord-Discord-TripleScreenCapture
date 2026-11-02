@@ -1,34 +1,27 @@
-# TripleScreen
+# TripleScreen (Vencord userplugin)
 
-Custom Vencord plugin that captures multiple monitors, lets you arrange them on a virtual canvas, and shares the composite as one Discord stream.
+Captures multiple monitors, arranges them on a canvas, and shares **one** composite stream through Discord Desktop.
 
-Viewers do **not** need TripleScreen installed.
+Viewers do **not** need this plugin.
 
-## Install (Discord Desktop + Vencord from source)
+## Install
 
-1. Clone and set up [Vencord](https://docs.vencord.dev/installing/) from source.
-2. Copy this folder to `Vencord/src/userplugins/triplescreen/`.
-3. Build Vencord (`pnpm build` / `npm run build` per upstream docs) and restart Discord.
-4. Enable **TripleScreen** under Settings → Vencord → Plugins.
+This folder must live at:
 
-## Usage
+```text
+Vencord/src/userplugins/triplescreen/
+```
 
-1. Join a voice channel or call.
-2. Open TripleScreen via:
-   - Vencord Toolbox → **TripleScreen layout**
-   - Slash command `/triplescreen`
-   - Voice context menu → **Share Multiple Monitors**
-3. Select monitors, pick a layout preset or drag/resize on the canvas.
-4. Click **Start composite stream**.
-5. If Discord has not opened a Go Live connection yet, start screen share once — TripleScreen replaces the outgoing video track with the composite when MediaEngine exposes `conn.input.stream`.
-6. **Stop TripleScreen** (or stop Discord sharing) to release capture resources.
+Then rebuild Vencord (`pnpm build`) and fully restart Discord.
 
-## Architecture
+**Important:** the official Vencord installer does **not** load `userplugins`. You need a [source build](https://docs.vencord.dev/installing/).
 
-See the module tree under this folder and [`docs/FEASIBILITY.md`](../../../docs/FEASIBILITY.md) for Phase 1 streaming integration details.
+For the full setup guide, architecture, audio notes, and troubleshooting, see the repository root [`README.md`](../../../README.md).
 
-## Limits
+## Quick usage
 
-- Discord may clamp resolution / FPS below the requested output settings.
-- Track replacement depends on Discord’s MediaEngine connection exposing a replaceable `MediaStream`. If a client update removes that hook, TripleScreen falls back to local preview and logs diagnostics — normal single-monitor sharing remains available.
-- Do not promise arbitrary encoder settings Discord cannot negotiate.
+1. Join a voice channel.
+2. Open TripleScreen via the Screen Share **TripleScreen** tab, `/triplescreen`, Toolbox, or voice context menu.
+3. Select monitors → arrange → **Start composite stream**.
+4. Leave the **TripleScreen Output** window open while streaming.
+5. Stop via the modal, by closing the output window, or by ending Discord’s stream.
