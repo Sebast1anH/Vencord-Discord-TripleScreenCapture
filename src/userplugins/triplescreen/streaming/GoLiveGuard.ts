@@ -33,6 +33,8 @@ let originalSetGoLiveSource: ((...args: any[]) => unknown) | null = null;
 let patchedModule: { setGoLiveSource: (...args: any[]) => unknown; } | null = null;
 let activeOutputId: string | null = null;
 let ownsStream = false;
+/** Ignore STREAM_DELETE/CLOSE briefly after we apply go-live (Discord churns these). */
+let streamEventGuardUntil = 0;
 const audioTimers = new Set<number>();
 
 function withBypass<T>(fn: () => T): T {
@@ -178,19 +180,11 @@ function retargetToActive(source: unknown, activeId: string): unknown {
 }
 
 /**
- * Re-assert screen + soundshareId:1. setSoundshareSource(1) alone is not enough
- * for window: sources; for screen: it reinforces Discord's system path.
+ * Pin soundshare only. Never re-call setGoLiveSource here — that tears down /
+ * restarts capture and was crashing the composite after a few seconds.
  */
-function enableSystemAudio(engine: any) {
+function pinSystemAudio(engine: any) {
     if (!wantSystemAudio() || !engine || !activeOutputId || !isScreenSourceId(activeOutputId)) return;
-
-    withBypass(() => {
-        try {
-            engine.setGoLiveSource(screenSystemAudioSource(activeOutputId!), "stream");
-        } catch (err) {
-            logger.warn("Re-apply screen system-audio go-live failed", err);
-        }
-    });
 
     try {
         if (typeof engine.setSoundshareSource === "function") {
@@ -212,10 +206,11 @@ function enableSystemAudio(engine: any) {
 }
 
 function scheduleSystemAudioKeepalive() {
-    for (const ms of [200, 500, 1000, 2000, 4000, 8000]) {
+    // Light touch only — soundshare pin, no setGoLiveSource.
+    for (const ms of [400, 1500]) {
         scheduleAudio(() => {
             if (!ownsStream || !activeOutputId || !wantSystemAudio()) return;
-            enableSystemAudio(MediaEngineStore?.getMediaEngine?.());
+            pinSystemAudio(MediaEngineStore?.getMediaEngine?.());
         }, ms);
     }
 }
@@ -245,6 +240,7 @@ export function beginNativeShare(
 
     activeOutputId = videoSourceId;
     ownsStream = true;
+    streamEventGuardUntil = performance.now() + 12_000;
     clearAudioTimers();
 
     const payload = useScreenAudio
@@ -272,11 +268,7 @@ export function beginNativeShare(
     });
 
     if (useScreenAudio) {
-        try {
-            if (typeof engine.setSoundshareSource === "function") {
-                engine.setSoundshareSource(SYSTEM_AUDIO_ID, true, "stream");
-            }
-        } catch { /* optional */ }
+        pinSystemAudio(engine);
         scheduleSystemAudioKeepalive();
     } else if (wantAudio) {
         logger.warn(
@@ -361,7 +353,7 @@ export function installGoLiveGuard() {
                         context ?? "stream"
                     )
                 );
-                enableSystemAudio(MediaEngineStore?.getMediaEngine?.());
+                pinSystemAudio(MediaEngineStore?.getMediaEngine?.());
                 return result;
             }
 
@@ -377,7 +369,7 @@ export function installGoLiveGuard() {
                         originalSetGoLiveSource!.call(this, cleaned, context ?? "stream")
                     );
                     if (wantSystemAudio() && isScreenSourceId(activeOutputId)) {
-                        enableSystemAudio(MediaEngineStore?.getMediaEngine?.());
+                        pinSystemAudio(MediaEngineStore?.getMediaEngine?.());
                     }
                     return result;
                 }
@@ -395,6 +387,11 @@ export function installGoLiveGuard() {
 
 function onStreamGone() {
     if (!ownsStream && !activeOutputId) return;
+    // Discord emits STREAM_DELETE/CLOSE while renegotiating go-live; ignore during guard.
+    if (performance.now() < streamEventGuardUntil) {
+        logger.info("Ignoring stream-end event during go-live guard");
+        return;
+    }
     ownsStream = false;
     activeOutputId = null;
     clearAudioTimers();

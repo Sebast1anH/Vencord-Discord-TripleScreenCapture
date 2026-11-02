@@ -6,7 +6,6 @@
 
 import { Logger } from "@utils/Logger";
 import { findStoreLazy } from "@webpack";
-import { FluxDispatcher } from "@webpack/common";
 
 import { displayCaptureManager } from "../capture/DisplayCaptureManager";
 import { layoutManager } from "../layouts/LayoutManager";
@@ -18,6 +17,7 @@ import { beginNativeShare, endNativeShare } from "./GoLiveGuard";
 
 const logger = new Logger("TripleScreen:StreamAdapter");
 const ApplicationStreamingStore = findStoreLazy("ApplicationStreamingStore");
+const MediaEngineStore = findStoreLazy("MediaEngineStore");
 
 export type StreamAdapterStatus =
     | { state: "idle"; }
@@ -48,9 +48,13 @@ export class DiscordStreamAdapter {
     private canvasHeight = 1080;
     private liveFps = 30;
     private lastLayout: LayoutDefinition | null = null;
+    /** Layout actually sent to the output window (stage monitor excluded when system audio is on). */
+    private liveMosaicLayout: LayoutDefinition | null = null;
+    private stageScreenId: string | null = null;
     /** Ignore Discord "no stream" polls until go-live has had time to register. */
     private streamGuardUntil = 0;
     private streamMisses = 0;
+    private windowMisses = 0;
 
     subscribe(listener: StatusListener): () => void {
         this.listeners.add(listener);
@@ -131,7 +135,8 @@ export class DiscordStreamAdapter {
             if (!published) {
                 performanceMonitor.setError("Discord did not start the stream. Stay in a voice channel, then press Start again.");
             } else {
-                this.streamGuardUntil = performance.now() + 5000;
+                // Discord churns stream store / events for a while after setGoLiveSource.
+                this.streamGuardUntil = performance.now() + 15_000;
                 this.streamMisses = 0;
                 this.watchDiscordStreamEnd();
             }
@@ -149,15 +154,26 @@ export class DiscordStreamAdapter {
 
     updateLayout(layout: LayoutDefinition) {
         this.lastLayout = layout;
-        this.compositor?.setLayout(layout);
+        const mosaic = this.stageScreenId
+            ? {
+                ...layout,
+                monitors: layout.monitors.map(m =>
+                    m.monitorId === this.stageScreenId
+                        ? { ...m, selected: false, visible: false }
+                        : m
+                )
+            }
+            : layout;
+        this.liveMosaicLayout = mosaic;
+        this.compositor?.setLayout(mosaic);
         layoutManager.upsert(layout);
         if (!this.expectingWindow) return;
         if (this.layoutTimer) window.clearTimeout(this.layoutTimer);
         this.layoutTimer = window.setTimeout(() => {
             this.layoutTimer = 0;
             const native = nativeHelpers();
-            if (!native || !this.expectingWindow || !this.lastLayout) return;
-            void native.configureOutput(this.outputPayload(this.lastLayout)).then(result => {
+            if (!native || !this.expectingWindow || !this.liveMosaicLayout) return;
+            void native.configureOutput(this.outputPayload(this.liveMosaicLayout)).then(result => {
                 if (!result) return;
                 if (result.errors?.length) {
                     performanceMonitor.setError(result.errors.join("; "));
@@ -179,6 +195,8 @@ export class DiscordStreamAdapter {
         if (this.cleaning) return;
         this.cleaning = true;
         this.expectingWindow = false;
+        this.stageScreenId = null;
+        this.liveMosaicLayout = null;
         try {
             if (this.reapplyTimer) {
                 clearTimeout(this.reapplyTimer);
@@ -234,6 +252,9 @@ export class DiscordStreamAdapter {
                 `Stage monitor ${effectiveStage.screenId} hosts the fullscreen composite (excluded from mosaic for system audio)`
             );
         }
+
+        this.stageScreenId = effectiveStage?.screenId ?? null;
+        this.liveMosaicLayout = mosaicLayout;
 
         const opened = await native.openOutputWindow(width, height, fps, {
             stageScreenId: effectiveStage?.screenId ?? null
@@ -292,12 +313,8 @@ export class DiscordStreamAdapter {
         const audio = {
             includeSystemAudio: !!effectiveStage && wantAudio
         };
-        const started = beginNativeShare(goLiveId, quality, audio);
-        this.reapplyTimer = window.setTimeout(() => {
-            if (!this.expectingWindow || gen !== this.generation) return;
-            beginNativeShare(goLiveId, quality, audio);
-        }, 1200);
-        return started;
+        // Single apply — a delayed second setGoLiveSource was restarting capture and killing the stream.
+        return beginNativeShare(goLiveId, quality, audio);
     }
 
     private outputPayload(layout: LayoutDefinition) {
@@ -324,21 +341,54 @@ export class DiscordStreamAdapter {
 
     private watchOutputWindow() {
         this.stopWindowWatch();
-        this.windowWatch = setInterval(() => void this.onOutputWindowClosed(), 400);
+        this.windowMisses = 0;
+        this.windowWatch = setInterval(() => void this.onOutputWindowClosed(), 500);
     }
 
     private stopWindowWatch() {
         if (this.windowWatch) clearInterval(this.windowWatch);
         this.windowWatch = null;
+        this.windowMisses = 0;
     }
 
     private async onOutputWindowClosed() {
         if (this.cleaning || !this.expectingWindow) return;
         const native = nativeHelpers();
-        if (!native || await native.isOutputWindowOpen()) return;
+        if (!native) return;
+        try {
+            if (await native.isOutputWindowOpen()) {
+                this.windowMisses = 0;
+                return;
+            }
+        } catch {
+            // IPC blip during fullscreen transitions — do not tear down yet.
+            this.windowMisses += 1;
+            if (this.windowMisses < 4) return;
+            logger.warn("Output window IPC failed repeatedly — releasing composite");
+            this.expectingWindow = false;
+            await this.stop();
+            return;
+        }
+        this.windowMisses += 1;
+        if (this.windowMisses < 3) return;
         this.expectingWindow = false;
         logger.info("Output window closed — releasing the composite");
         await this.stop();
+    }
+
+    private streamStillLive() {
+        try {
+            if (ApplicationStreamingStore?.getCurrentUserActiveStream?.()) return true;
+        } catch { /* store unavailable */ }
+        try {
+            const engine = MediaEngineStore?.getMediaEngine?.();
+            for (const conn of [...(engine?.connections ?? [])]) {
+                if (conn.context !== "stream" && !conn.streamUserId) continue;
+                // Any live stream connection counts — store can lag behind MediaEngine.
+                return true;
+            }
+        } catch { /* engine unavailable */ }
+        return false;
     }
 
     private watchDiscordStreamEnd() {
@@ -347,14 +397,13 @@ export class DiscordStreamAdapter {
             if (!this.expectingWindow || this.cleaning) return;
             if (performance.now() < this.streamGuardUntil) return;
             try {
-                const active = ApplicationStreamingStore?.getCurrentUserActiveStream?.();
-                if (active) {
+                if (this.streamStillLive()) {
                     this.streamMisses = 0;
                     return;
                 }
-                // Require consecutive empty polls — Discord can briefly report null after go-live.
+                // Require several consecutive empty polls — store/engine flicker after go-live.
                 this.streamMisses += 1;
-                if (this.streamMisses < 2) return;
+                if (this.streamMisses < 5) return;
                 if (this.status.state === "streaming") {
                     logger.info("Discord stream ended — releasing TripleScreen");
                     void this.stop();
@@ -363,18 +412,10 @@ export class DiscordStreamAdapter {
                 /* store may be unavailable briefly */
             }
         };
-        const timer = setInterval(check, 1500);
+        const timer = setInterval(check, 2000);
         this.streamWatch = () => clearInterval(timer);
-        FluxDispatcher.subscribe("STREAM_DELETE", check as any);
-        FluxDispatcher.subscribe("STREAM_CLOSE", check as any);
-        const prev = this.streamWatch;
-        this.streamWatch = () => {
-            prev?.();
-            try {
-                FluxDispatcher.unsubscribe("STREAM_DELETE", check as any);
-                FluxDispatcher.unsubscribe("STREAM_CLOSE", check as any);
-            } catch { /* ignore */ }
-        };
+        // Do not stop on STREAM_DELETE/CLOSE alone — Discord fires these while renegotiating.
+        // Polling MediaEngine + ApplicationStreamingStore is the durable signal.
     }
 
     private unwatchDiscordStreamEnd() {

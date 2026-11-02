@@ -4,6 +4,18 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Composite teardown after a few seconds
+
+### Fixed
+- Composite dying shortly after start: audio keepalive was re-calling `setGoLiveSource`, which restarts Discord capture and races `STREAM_DELETE` / stream-store polls into a full TripleScreen teardown
+- Removed the delayed second `beginNativeShare` (same restart hazard)
+- Stream-end watcher now uses MediaEngine connections, a 15s go-live guard, and 5 consecutive misses; no longer stops on lone `STREAM_DELETE`/`STREAM_CLOSE` events
+- GoLiveGuard ignores stream-end events for 12s after apply
+- Output-window closed watcher requires consecutive misses (IPC blips during fullscreen)
+- Layout updates keep the stage monitor excluded from the mosaic
+
+---
+
 ## 2026-11-02 — System audio via stage monitor
 
 ### Fixed
