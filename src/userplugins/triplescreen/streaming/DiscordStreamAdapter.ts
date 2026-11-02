@@ -296,7 +296,18 @@ export class DiscordStreamAdapter {
             logger.warn("No stage display available for system audio — streaming video only");
         }
 
-        return beginNativeShare(goLiveId, quality, { includeSystemAudio: audioOn });
+        const started = beginNativeShare(goLiveId, quality, { includeSystemAudio: audioOn });
+        // Stream connection may not exist on the first call — re-apply once Discord has a stream conn.
+        // CDP: conn.setGoLiveSource({ quality, desktopDescription }) is what sticks.
+        if (audioOn) {
+            for (const ms of [400, 1200, 2500]) {
+                window.setTimeout(() => {
+                    if (!this.expectingWindow || gen !== this.generation) return;
+                    beginNativeShare(goLiveId, quality, { includeSystemAudio: true });
+                }, ms);
+            }
+        }
+        return started;
     }
 
     private outputPayload(layout: LayoutDefinition) {

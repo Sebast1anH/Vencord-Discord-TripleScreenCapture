@@ -4,6 +4,18 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Fix go-live payload shape (quality + desktopDescription)
+
+### Fixed
+- **System audio never engaged:** Live CDP showed `goLiveSourceIdentifier: window:…` and `soundshareId: <PID>`. Our `setGoLiveSource({ id, soundshareId, useLoopback })` throws on current Discord (`Cannot destructure property 'resolution' of 'e.quality'`), so the stream stayed on the Output window PID loopback.
+- Correct Discord 1.0.9266 shape: `{ quality, desktopDescription: { id: "screen:N:0", soundshareId: 1, useLoopback: true, … } }` — verified live via CDP (`goLive` → `screen:0:0`, `soundshareId` → `1`).
+- Re-apply go-live after the stream connection exists (400/1200/2500 ms).
+
+### Note
+- Discord still cannot put system mix on a **window:** share of Discord.exe. Viewers see the Output mosaic because it is hosted fullscreen on the screen we capture.
+
+---
+
 ## 2026-11-02 — Hold stage screen against window steal; restore minimize park
 
 ### Fixed
