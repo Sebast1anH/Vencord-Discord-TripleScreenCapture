@@ -153,14 +153,21 @@ function matchDisplaysToSources(
         const dipW = display.bounds?.width || display.size.width;
         const dipH = display.bounds?.height || display.size.height;
         const scale = Number(display.scaleFactor) || 1;
-        const primaryIdStr = source?.id ?? `screen:${orderIdx}:0`;
-        const altIds = [...new Set([
-            primaryIdStr,
-            `screen:${orderIdx}:0`,
-            `screen:${index}:0`,
+        const primaryIdStr = source?.id ?? `screen:${display.id}:0`;
+        // Only same-display spellings — never screen:${index}/orderIdx (those are OTHER monitors).
+        const sameDisplayAlts = [
             `screen:${display.id}:0`,
-            source?.display_id ? `screen:${source.display_id}:0` : ""
-        ].filter(Boolean))].filter(id => id !== primaryIdStr);
+            `screen:${display.id}`,
+            source?.display_id && String(source.display_id) === String(display.id)
+                ? `screen:${source.display_id}:0`
+                : "",
+            source?.display_id && String(source.display_id) === String(display.id)
+                ? `screen:${source.display_id}`
+                : ""
+        ];
+        const altIds = [...new Set(sameDisplayAlts.filter(Boolean))].filter(id => id !== primaryIdStr);
+        void index;
+        void orderIdx;
 
         let url: string | undefined;
         try {
@@ -308,6 +315,8 @@ const lastFrame = new Map();
 /** Locked capture→draw rotation per source (must not flip every frame). */
 const orientLock = new Map();
 const reconnectAt = new Map();
+const lastLiveAt = new Map();
+const lastSnapshotAt = new Map();
 let cfg = null;
 let bgImage = null;
 let bgImageUrl = "";
@@ -395,15 +404,25 @@ function snapshotLastFrame(id, video) {
   } catch (_) {}
 }
 
-function scheduleReconnect(id) {
+function scheduleReconnect(id, force) {
   if (!cfg || !(cfg.items || []).some(item => item.sourceId === id)) return;
   const now = Date.now();
   const nextAt = reconnectAt.get(id) || 0;
   if (now < nextAt) return;
-  reconnectAt.set(id, now + 1500);
+  reconnectAt.set(id, now + 2000);
   setTimeout(() => {
     if (!cfg || !(cfg.items || []).some(item => item.sourceId === id)) return;
-    if (videos.has(id) || pending.has(id)) return;
+    if (pending.has(id)) return;
+    if (force && videos.has(id)) {
+      const old = videos.get(id);
+      try {
+        const stream = old && old.srcObject;
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        if (old) old.remove();
+      } catch (_) {}
+      videos.delete(id);
+    }
+    if (videos.has(id)) return;
     ensureVideo(id).catch(() => {});
   }, 200);
 }
@@ -452,38 +471,52 @@ async function ensureVideo(id) {
     let stream = null;
     let usedId = id;
     let lastErr = null;
-    for (const candidate of candidates) {
-      if (inUse.has(candidate)) continue;
-      try {
-        stream = await openDesktopStream(candidate, maxFps);
-        usedId = candidate;
-        break;
-      } catch (err) {
-        lastErr = err;
+    try {
+      for (const candidate of candidates) {
+        if (inUse.has(candidate)) continue;
+        try {
+          stream = await openDesktopStream(candidate, maxFps);
+          usedId = candidate;
+          break;
+        } catch (err) {
+          lastErr = err;
+        }
       }
-    }
-    if (!stream) throw lastErr || new Error("No desktop source worked for " + id);
-    const video = document.createElement("video");
-    video.muted = true;
-    video.playsInline = true;
-    video.srcObject = stream;
-    video.__tsSourceId = usedId;
-    video.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none";
-    document.body.appendChild(video);
-    await video.play();
-    const track = stream.getVideoTracks()[0];
-    if (track) {
-      try { track.contentHint = "motion"; } catch (_) {}
-      track.onended = () => {
-        snapshotLastFrame(id, video);
+      if (!stream) throw lastErr || new Error("No desktop source worked for " + id);
+      const video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.srcObject = stream;
+      video.__tsSourceId = usedId;
+      video.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none";
+      document.body.appendChild(video);
+      try {
+        await video.play();
+      } catch (playErr) {
+        try { stream.getTracks().forEach(t => t.stop()); } catch (_) {}
         try { video.remove(); } catch (_) {}
-        if (videos.get(id) === video) videos.delete(id);
-        scheduleReconnect(id);
-      };
-      track.onmute = () => { snapshotLastFrame(id, video); };
+        throw playErr;
+      }
+      const track = stream.getVideoTracks()[0];
+      if (track) {
+        try { track.contentHint = "motion"; } catch (_) {}
+        track.onended = () => {
+          snapshotLastFrame(id, video);
+          try { video.remove(); } catch (_) {}
+          if (videos.get(id) === video) videos.delete(id);
+          scheduleReconnect(id, false);
+        };
+        track.onmute = () => { snapshotLastFrame(id, video); };
+      }
+      videos.set(id, video);
+      lastLiveAt.set(id, Date.now());
+      return video;
+    } catch (err) {
+      if (stream) {
+        try { stream.getTracks().forEach(t => t.stop()); } catch (_) {}
+      }
+      throw err;
     }
-    videos.set(id, video);
-    return video;
   })();
   pending.set(id, job);
   try { return await job; }
@@ -545,13 +578,27 @@ function draw() {
     const video = videos.get(item.sourceId);
     const freeze = frozen.get(item.sourceId);
     const hold = lastFrame.get(item.sourceId);
-    const liveOk = video && video.readyState >= 2 && video.videoWidth > 0
-      && !(video.srcObject && video.srcObject.getVideoTracks && video.srcObject.getVideoTracks()[0] && video.srcObject.getVideoTracks()[0].muted);
-    if (liveOk) snapshotLastFrame(item.sourceId, video);
+    const trackMuted = !!(video && video.srcObject && video.srcObject.getVideoTracks
+      && video.srcObject.getVideoTracks()[0] && video.srcObject.getVideoTracks()[0].muted);
+    const liveOk = video && video.readyState >= 2 && video.videoWidth > 0 && !trackMuted;
+    if (liveOk) {
+      lastLiveAt.set(item.sourceId, Date.now());
+      const snapAt = lastSnapshotAt.get(item.sourceId) || 0;
+      if (Date.now() - snapAt > 1000) {
+        snapshotLastFrame(item.sourceId, video);
+        lastSnapshotAt.set(item.sourceId, Date.now());
+      }
+    } else {
+      // Held frame must not block reconnect forever (F05) — force reopen after stall.
+      const stalledFor = Date.now() - (lastLiveAt.get(item.sourceId) || 0);
+      if (stalledFor > 2500 && !frozen.has(item.sourceId)) {
+        scheduleReconnect(item.sourceId, true);
+      }
+    }
     const src = liveOk ? video : (hold || freeze);
     if (!src) {
-      if (!videos.has(item.sourceId) && !pending.has(item.sourceId) && !frozen.has(item.sourceId)) {
-        scheduleReconnect(item.sourceId);
+      if (!pending.has(item.sourceId) && !frozen.has(item.sourceId)) {
+        scheduleReconnect(item.sourceId, false);
       }
       continue;
     }
@@ -600,6 +647,8 @@ window.__tsApply = function (next) {
       lastFrame.delete(id);
       orientLock.delete(id);
       reconnectAt.delete(id);
+      lastLiveAt.delete(id);
+      lastSnapshotAt.delete(id);
     }
     for (const id of [...frozen.keys()]) {
       if (ids.includes(id)) continue;
@@ -610,8 +659,12 @@ window.__tsApply = function (next) {
       lastFrame.delete(id);
       orientLock.delete(id);
       reconnectAt.delete(id);
+      lastLiveAt.delete(id);
+      lastSnapshotAt.delete(id);
     }
     return { ok: errors.length === 0, videos: videos.size + frozen.size, errors: errors };
+  }).catch(err => {
+    return { ok: false, videos: videos.size, errors: [err && err.message ? err.message : String(err)] };
   });
   return applyChain;
 };
@@ -694,7 +747,12 @@ export async function openOutputWindow(
     }
     stageDisplayId = nextStageId;
 
-    const area = (stageDisplay ?? screen.getPrimaryDisplay()).workArea;
+    // Prefer a non-primary display so the Output window is less likely to appear inside a captured tile (F15).
+    const primary = screen.getPrimaryDisplay();
+    const hostDisplay = stageDisplay
+        ?? screen.getAllDisplays().find(d => d.id !== primary.id)
+        ?? primary;
+    const area = hostDisplay.workArea;
     const maxW = Math.max(320, area.width - (stageDisplay ? 0 : 48));
     const maxH = Math.max(240, area.height - (stageDisplay ? 0 : 48));
     const scale = stageDisplay ? 1 : Math.min(1, maxW / canvasW, maxH / canvasH);
@@ -715,6 +773,8 @@ export async function openOutputWindow(
         const win = new BrowserWindow({
             width: w,
             height: h,
+            x: area.x + Math.max(0, Math.floor((area.width - w) / 2)),
+            y: area.y + Math.max(0, Math.floor((area.height - h) / 2)),
             title: OUTPUT_TITLE,
             show: false,
             frame: true,
@@ -729,13 +789,17 @@ export async function openOutputWindow(
                 nodeIntegration: false,
                 contextIsolation: true,
                 sandbox: false,
-                webSecurity: false,
+                webSecurity: true,
                 backgroundThrottling: false
             }
         });
         outputWindow = win;
         win.setContentProtection(false);
         win.webContents.setBackgroundThrottling(false);
+        win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+        win.webContents.on("will-navigate", e => {
+            e.preventDefault();
+        });
         win.on("closed", () => {
             if (outputWindow === win) outputWindow = null;
             pageReady = null;
@@ -890,31 +954,39 @@ export async function configureOutput(_event: IpcMainInvokeEvent, config: unknow
     const safe = sanitizeOutputConfig(config);
     if (!safe) return { ok: false, videos: 0, errors: ["Invalid output config"] };
 
-    // Re-resolve capturer ids right before capture so Windows display_id mismatches
-    // cannot leave two tiles on the same source (secondary flicker).
+    // Re-resolve capturer ids: exact match first, then same-display alts, then size.
+    // Never assign a random unused screen (that swaps monitors).
     try {
         const screens = await listScreens(_event);
         const used = new Set<string>();
-        for (const item of safe.items as Array<Record<string, any>>) {
-            let match = screens.find(s =>
-                (s.id === item.sourceId || (s.altIds || []).includes(item.sourceId)) && !used.has(s.id)
+        const items = safe.items as Array<Record<string, any>>;
+        const bind = (item: Record<string, any>, match: NativeScreen) => {
+            used.add(match.id);
+            item.sourceId = match.id;
+            item.altSourceIds = match.altIds || [];
+            item.isPrimary = !!match.isPrimary;
+            item.expectW = match.width;
+            item.expectH = match.height;
+            item.displayRotation = match.rotation || 0;
+        };
+        for (const item of items) {
+            const exact = screens.find(s => s.id === item.sourceId && !used.has(s.id));
+            if (exact) bind(item, exact);
+        }
+        for (const item of items) {
+            if (used.has(item.sourceId)) continue;
+            const byAlt = screens.find(s =>
+                !used.has(s.id) && (s.altIds || []).includes(String(item.sourceId))
             );
-            if (!match && item.expectW && item.expectH) {
-                match = screens.find(s =>
-                    !used.has(s.id) && s.width === item.expectW && s.height === item.expectH
-                );
-            }
-            if (!match) match = screens.find(s => !used.has(s.id) && !!s.isPrimary === !!item.isPrimary);
-            if (!match) match = screens.find(s => !used.has(s.id));
-            if (match) {
-                used.add(match.id);
-                item.sourceId = match.id;
-                item.altSourceIds = match.altIds || [];
-                item.isPrimary = !!match.isPrimary;
-                item.expectW = match.width;
-                item.expectH = match.height;
-                item.displayRotation = match.rotation || 0;
-            }
+            if (byAlt) bind(item, byAlt);
+        }
+        for (const item of items) {
+            if (used.has(item.sourceId)) continue;
+            if (!item.expectW || !item.expectH) continue;
+            const bySize = screens.find(s =>
+                !used.has(s.id) && s.width === item.expectW && s.height === item.expectH
+            );
+            if (bySize) bind(item, bySize);
         }
     } catch { /* keep sanitized ids */ }
 
@@ -1113,8 +1185,14 @@ function parkForMinimize(win: import("electron").BrowserWindow) {
             ? screen.getAllDisplays().find(d => d.id === stageDisplayId)
             : null) ?? screen.getDisplayMatching(current);
         const area = display.workArea;
-        const fw = Math.min(Math.max(320, floatingSize.width), area.width);
-        const fh = Math.min(Math.max(240, floatingSize.height), area.height);
+        // Uniform scale so park never breaks canvas aspect (F04).
+        const fit = Math.min(
+            1,
+            area.width / Math.max(1, floatingSize.width),
+            area.height / Math.max(1, floatingSize.height)
+        );
+        const fw = Math.max(320, Math.round(floatingSize.width * fit));
+        const fh = Math.max(240, Math.round(floatingSize.height * fit));
         win.setContentSize(fw, fh);
         const [bw, bh] = win.getSize();
         // Keep on the same monitor (corner), not teleport to primary.

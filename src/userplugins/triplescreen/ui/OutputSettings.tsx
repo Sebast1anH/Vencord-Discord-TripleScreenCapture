@@ -255,9 +255,9 @@ export function OutputSettingsPanel({ value, onChange }: Props) {
             </div>
 
             <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
-                The preview frame matches your stream resolution. System audio uses Discord&apos;s Entire-Screen path
-                (window share of Discord&apos;s Output only captures Discord.exe — friends hear themselves). Every
-                selected monitor stays in the mosaic. Discord still caps video (often 720p without Nitro, 1080p with Nitro).
+                The preview frame matches your stream resolution. System audio pins Discord soundshareId 1 on the
+                Output window share (desktop mix, not call echo). Every selected monitor stays in the mosaic.
+                Discord still caps video (often 720p without Nitro, 1080p with Nitro).
             </p>
         </div>
     );

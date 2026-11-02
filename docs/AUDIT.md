@@ -1,52 +1,87 @@
-# TripleScreen audit — 2026-11-02 (system audio, evidence-based)
+# TripleScreen full audit — 2026-11-02
 
-## What actually broke system audio
+Evidence-based review of `src/userplugins/triplescreen/` after live audio/minimize/2-monitor work.
 
-Friends heard **themselves** and nothing else (YouTube/games silent).
+## Executive summary
 
-That is Discord.exe process loopback: TripleScreen Output is a `BrowserWindow` owned by Discord, so
+TripleScreen composites selected monitors into an Output `BrowserWindow` and points Discord’s MediaEngine at that window. System audio currently pins `soundshareId: 1` on the window share (user-confirmed working with a friend). Remaining structural risks: **monitor source identity** (Windows `display_id` mismatches), **tile reconnect / hold-frame dead-ends**, **go-live ownership** (false “Live”, delayed re-`setGoLiveSource`, stream-end ignored), and **park/occlusion** behavior.
 
-```text
-setGoLiveSource({ id: "window:…", soundshareId: <Discord PID> })
-```
+## Architecture (current, verified intent)
 
-captures only Discord’s process tree (`ActivateApplicationLoopbackFromPid`).
-
-### Evidence (not speculation)
-
-| Source | Fact |
-|--------|------|
-| [jimman0I/soundshareSource.desktop](https://github.com/jimman0I/soundshareSource.desktop) | Entire Screen → `soundshareId: 1`; window → PID. `1` is the system-mix sentinel. |
-| Live CDP on this project (earlier session) | Stream already had `soundshareId: 1` on a **window:** source, and viewers still heard Discord-only echo. |
-| Nightcord `applyStreamAudio("system")` | Calls `setSoundshareSource(null, false)` to clear a PID filter on an **already screen-based** share — not a window→system bridge. |
-| User report after null/false + screen-bootstrap→window | Still Discord-only echo. |
-
-**Conclusion:** System audio requires go-live **video** id to be `screen:` / `screen-handle:` with `soundshareId: 1`. Switching back to a window source undoes it. Rewriting `soundshareId` on a window source does not enable endpoint loopback.
-
-## Correct architecture
-
-1. Select N monitors → mosaic includes **all** of them (no tile dropped for audio).
-2. Open floating Output → start capture of every selected monitor.
-3. If system audio: freeze the stage display’s tile (still frame), then fullscreen Output on that display.
-4. `setGoLiveSource({ id: stageScreen, soundshareId: 1 })` — Discord Entire-Screen audio path.
-5. Viewers see the fullscreen mosaic (all tiles). Stage tile may be a frozen pre-fullscreen snapshot so it does not recursively show the composite.
-
-Prefer an **unselected** display as stage when one exists; otherwise host on primary / first selected (still kept in the mosaic).
+1. Enumerate displays via Electron `desktopCapturer` + `screen` (unique source binding).
+2. Open Output window → per-monitor `getUserMedia(chromeMediaSource: desktop)`.
+3. Composite tiles to a canvas in the Output page.
+4. `setGoLiveSource({ quality, desktopDescription: { id: window:…, soundshareId: 1|−1 } })`.
+5. Minimize → park (painted, non-iconic) so `window:` capture stays alive.
 
 ## Findings
 
-| ID | Severity | Status | Finding |
-|----|----------|--------|---------|
-| C1 | Critical | **Fixed** | Window go-live cannot carry system mix; restored screen-stage go-live. |
-| C2 | Critical | **Fixed** | Earlier “fix” kept switching to window after bootstrap — audio stayed Discord PID. |
-| C3 | High | Fixed | Do not exclude the stage monitor from the mosaic (that blocked “all 3”). Freeze tile instead. |
-| C4 | High | Fixed earlier | False STREAM_DELETE / store polls tearing down composite. |
-| C5 | Medium | Fixed earlier | Background scale/pan + stream-frame preview. |
-| C6 | Info | Open | Stage tile content is frozen while Output hosts that display (live apps on that monitor won’t update in that tile). |
-| C7 | Info | Open | Discord encoder / Nitro still cap resolution & FPS. |
+| ID | Sev | Status | Finding |
+|----|-----|--------|---------|
+| F01 | Critical [verify] | **Mitigated (user-confirmed audio)** | Window + `soundshareId:1` contradicted older AUDIT evidence; friend audible test passed. Keep pinning + keepalive; stage path remains fallback if regression. |
+| F02 | High | **Fixing** | “Live” reported when `setGoLiveSource` doesn’t throw; no stream-connection verify. |
+| F03 | High | **Fixing** | `altIds` / rematch could bind wrong/duplicate monitors (`screen:${index}:0`). |
+| F04 | High | **Fixing** | Park size clamp broke aspect → stretched mosaic. |
+| F05 | High | **Fixing** | Held last-frame prevented reconnect forever after DXGI drop. |
+| F06 | High | **Fixing** | Delayed re-`beginNativeShare` (400/1200/3000) restarts capture. |
+| F07 | High [verify] | Open | Parked/occluded Output may stall Chromium compositing. |
+| F08 | High | **Fixing** | `STREAM_DELETE` ignored; Output keeps running after Discord stops. |
+| F09 | Medium | **Fixing** | Transient `setGoLiveSource(null)` dropped ownership immediately. |
+| F10 | Medium | Open | `listScreens` on every layout drag (thumbnail cost). |
+| F11 | Medium | **Fixing** | Alt-id fallbacks pointed at other monitors. |
+| F12 | Medium | **Fixing** | Minimize→restore flash; park snaps corner (keep uniform scale). |
+| F13 | Medium | Open | Orientation lock can still flip after 1.5s if sizes alternate. |
+| F14 | Medium | **Fixing** | Snapshot every draw doubled GPU work. |
+| F15 | Medium | **Fixing** | Output opens on primary → Droste/self-capture. Prefer non-primary host. |
+| F16 | Medium | Open | Teardown races if start during stop. |
+| F17 | Medium | Open | Saved layouts keyed by unstable `screen:N:0`. |
+| F18 | Medium | **Partial** | Enable `webSecurity`; deny navigate/`window.open`. |
+| F19 | Medium | Open | PowerShell `Add-Type` on park (AMSI / Constrained Language). |
+| F20 | Medium | **Fixing** | Keepalive repaired forever with no stream connection. |
+| F21 | Medium [verify] | Open | Guard may patch wrong `setGoLiveSource` export. |
+| F22–F28 | Low/Info | Partial | Poll rate, dead stage code, tools/ untracked, etc. |
 
-## Verification
+## Fix concept (prioritized)
 
-- [ ] All 3 monitors selected + system audio → mosaic shows 3 tiles
-- [ ] Viewers hear YouTube/game audio, not call echo
-- [ ] Stream stays up >30s (Stop / close Output ends it)
+### P0 — Diagnostics
+Expose stream `goLive` / `soundshareId`, per-tile live/stalled, visibility. (Follow-up.)
+
+### P1 — Monitor identity (F03, F11)
+- Exact `sourceId` match first; alts only if no exact hit.
+- Alts must be spellings of the **same** display, never ordinals of other monitors.
+- No “first unused screen” assignment for unmatched tiles.
+
+### P2 — Output page reliability (F05, F14, F23)
+- Watchdog reconnect even while holding last frame.
+- Snapshot on mute/ended only (not every paint).
+- `ensureVideo` / `applyChain` error cleanup.
+
+### P3 — Window / park (F04, F12, F15, F18)
+- Uniform aspect when parking.
+- Prefer host display that is not primary (reduce self-capture).
+- Harden BrowserWindow navigation / `webSecurity`.
+
+### P4 — Go-live ownership (F06, F08, F09, F20)
+- Single `beginNativeShare`; keepalive repairs only when connection exists and state wrong.
+- Grace period on `null` before releasing; notify adapter to stop.
+- Honor confirmed stream-end after grace.
+
+### P5 — Audio fallback
+If `soundshareId:1` on window regresses: restore selectable stage-screen mode (dead native stage helpers exist).
+
+## Verification checklist
+
+- [ ] 2 monitors landscape — both tiles stable, no flicker
+- [ ] 1 portrait + 1 landscape — portrait stable
+- [ ] System audio: friend hears YouTube, not call echo
+- [ ] Minimize/park — mosaic + audio continue
+- [ ] Stop from Discord UI — Output tears down within a few seconds
+- [ ] Layout drag — no monitor swap
+
+## What already looks correct
+
+- IPC sanitization (`screen:` ids only, clamped geometry, data-URL bg images).
+- Unique capturer assignment intent (no double-bind of same source when matching works).
+- `{ quality, desktopDescription }` go-live payload shape (Discord 1.0.9266).
+- `normalizeWindowSourceId`, file:// Output page for `mediaDevices`.
+- Generation guards in adapter `start()`.

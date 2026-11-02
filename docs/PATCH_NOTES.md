@@ -4,6 +4,23 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Full audit fixes (identity, go-live, park, tiles)
+
+### Fixed
+- **Wrong/swapped monitors:** Capturer rematch is exact-id first; ordinal alt-ids removed; no “first unused” assignment.
+- **Frozen secondary tile:** Watchdog force-reconnects even while holding last frame after DXGI stalls.
+- **Stream blips:** Removed delayed re-`beginNativeShare` (400/1200/3000 ms).
+- **Zombie Output after Discord stop:** Go-live release handler + grace on `null` / STREAM_DELETE; keepalive stops when no connection.
+- **Park stretch:** Uniform aspect scale when parking.
+- **Self-capture:** Output prefers a non-primary host display.
+- **Docs:** `docs/AUDIT.md` rewritten; UI copy matches window + soundshareId 1.
+
+### Changed
+- Output `webSecurity: true`; deny navigate / `window.open`.
+- Window poll 500 ms; last-frame snapshot at most 1/s.
+
+---
+
 ## 2026-11-02 — Two-monitor secondary tile flicker
 
 ### Fixed

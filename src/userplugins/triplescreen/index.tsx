@@ -96,9 +96,8 @@ export default definePlugin({
                 TripleScreen composites selected displays into one Discord Go Live stream. Viewers do not need the plugin.
             </span>
             <span>
-                System audio (Windows): the Output window mirrors your desktop mix without Discord (so friends
-                do not hear themselves). You are briefly deafened in VC while streaming so call audio is not
-                captured. Minimize parks the Output; the mosaic keeps streaming.
+                System audio (Windows): Discord soundshareId 1 is pinned on the Output window share so viewers
+                hear the desktop mix (not Discord call audio). Minimize parks the Output; mosaic + audio keep streaming.
             </span>
             <span>
                 Open Discord&apos;s Screen Share picker → TripleScreen tab, a voice-channel menu, the Vencord toolbox, or /triplescreen.

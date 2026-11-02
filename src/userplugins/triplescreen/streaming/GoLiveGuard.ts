@@ -38,6 +38,9 @@ let streamEventsBound = false;
 let lastQuality = { resolution: 1080, frameRate: 30 };
 const audioTimers = new Set<number>();
 let audioInterval = 0;
+let releaseTimer = 0;
+let onReleased: (() => void) | null = null;
+let missingConnTicks = 0;
 
 export function isNativeShareActive() {
     return ownsStream && !!activeOutputId;
@@ -45,6 +48,34 @@ export function isNativeShareActive() {
 
 export function getActiveGoLiveId() {
     return ownsStream ? activeOutputId : null;
+}
+
+/** Adapter registers so Discord stream-end can tear down Output / captures. */
+export function setNativeShareReleaseHandler(handler: (() => void) | null) {
+    onReleased = handler;
+}
+
+function clearReleaseTimer() {
+    if (releaseTimer) {
+        window.clearTimeout(releaseTimer);
+        releaseTimer = 0;
+    }
+}
+
+function releaseOwnership(reason: string) {
+    clearReleaseTimer();
+    if (!ownsStream && !activeOutputId) return;
+    logger.info("Releasing TripleScreen go-live ownership", reason);
+    ownsStream = false;
+    activeOutputId = null;
+    wantAudio = false;
+    clearAudioTimers();
+    missingConnTicks = 0;
+    try {
+        onReleased?.();
+    } catch (err) {
+        logger.warn("Release handler failed", err);
+    }
 }
 
 function withBypass<T>(fn: () => T): T {
@@ -225,11 +256,26 @@ function applyGoLive(engine: any, sourceId: string, withSystemAudio: boolean) {
 }
 
 function reinforceSystemAudio(engine: any) {
-    if (!ownsStream || !activeOutputId || !wantAudio || !engine) return;
+    if (!ownsStream || !activeOutputId || !engine) return;
     const state = readStreamAudioState(engine);
-    const onOurWindow = state?.goLive
+    if (!state) {
+        // No stream connection — do not spam setGoLiveSource (F20).
+        missingConnTicks += 1;
+        if (missingConnTicks >= 3) {
+            releaseOwnership("no stream connection");
+        }
+        return;
+    }
+    missingConnTicks = 0;
+    const onOurWindow = state.goLive
         && normalizeWindowSourceId(state.goLive) === normalizeWindowSourceId(activeOutputId);
-    const audioOk = state?.soundshareId === SYSTEM_AUDIO_ID && state.soundshareActive;
+    if (!wantAudio) {
+        if (!onOurWindow && state.goLive) {
+            withBypass(() => applyGoLive(engine, activeOutputId!, false));
+        }
+        return;
+    }
+    const audioOk = state.soundshareId === SYSTEM_AUDIO_ID && state.soundshareActive;
     if (onOurWindow && audioOk) return;
 
     logger.info("Repairing Output window system audio", state);
@@ -242,14 +288,13 @@ function reinforceSystemAudio(engine: any) {
 function scheduleSystemAudioKeepalive() {
     for (const ms of [100, 250, 500, 1000, 2000, 4000, 8000]) {
         scheduleAudio(() => {
-            if (!ownsStream || !wantAudio) return;
+            if (!ownsStream) return;
             reinforceSystemAudio(MediaEngineStore?.getMediaEngine?.());
         }, ms);
     }
-    // Discord periodically rewrites window soundshare back to a PID — keep pinning.
     if (audioInterval) window.clearInterval(audioInterval);
     audioInterval = window.setInterval(() => {
-        if (!ownsStream || !wantAudio) return;
+        if (!ownsStream) return;
         reinforceSystemAudio(MediaEngineStore?.getMediaEngine?.());
     }, 2000);
 }
@@ -278,12 +323,15 @@ export function beginNativeShare(
         frameRate: quality?.frameRate ?? 30
     };
 
+    clearReleaseTimer();
     activeOutputId = sourceId;
     ownsStream = true;
+    missingConnTicks = 0;
     clearAudioTimers();
 
     const applied = withBypass(() => applyGoLive(engine, sourceId, wantAudio));
-    if (wantAudio) scheduleSystemAudioKeepalive();
+    // Keepalive always — also detects missing stream connection / wrong video target.
+    scheduleSystemAudioKeepalive();
 
     logger.info(
         "Requested Discord go live",
@@ -296,8 +344,10 @@ export function beginNativeShare(
 }
 
 export function endNativeShare() {
+    clearReleaseTimer();
     clearAudioTimers();
     wantAudio = false;
+    missingConnTicks = 0;
     if (!ownsStream && !activeOutputId) return;
 
     const engine = MediaEngineStore?.getMediaEngine?.();
@@ -331,16 +381,25 @@ export function installGoLiveGuard() {
             }
 
             if (source == null) {
-                if (ownsStream) {
-                    ownsStream = false;
-                    activeOutputId = null;
-                    wantAudio = false;
-                    clearAudioTimers();
+                // Grace: Discord often clears briefly during renegotiation (F09).
+                if (ownsStream && !releaseTimer) {
+                    releaseTimer = window.setTimeout(() => {
+                        releaseTimer = 0;
+                        if (!ownsStream || !activeOutputId) return;
+                        const eng = MediaEngineStore?.getMediaEngine?.();
+                        const state = eng ? readStreamAudioState(eng) : null;
+                        if (state?.goLive) {
+                            withBypass(() => applyGoLive(eng, activeOutputId!, wantAudio));
+                            return;
+                        }
+                        releaseOwnership("setGoLiveSource(null) settled");
+                    }, 2500);
                 }
                 return originalSetGoLiveSource!.apply(this, args);
             }
 
             if (activeOutputId && ownsStream) {
+                clearReleaseTimer();
                 const nextId = sourceIdOf(source);
                 const normalizedNext = isWindowSourceId(nextId) ? normalizeWindowSourceId(nextId) : nextId;
                 const normalizedActive = isWindowSourceId(activeOutputId)
@@ -354,10 +413,7 @@ export function installGoLiveGuard() {
                     && isWindowSourceId(normalizedActive)
                     && normalizedNext !== normalizedActive
                 ) {
-                    ownsStream = false;
-                    activeOutputId = null;
-                    wantAudio = false;
-                    clearAudioTimers();
+                    releaseOwnership("user switched share target");
                     return originalSetGoLiveSource!.apply(this, args);
                 }
 
@@ -393,12 +449,26 @@ export function installGoLiveGuard() {
 
 function onStreamGone() {
     if (!ownsStream && !activeOutputId) return;
-    logger.info("Ignoring stream-end event while TripleScreen owns go-live");
+    // Grace then release — Discord emits false STREAM_DELETE during renegotiation.
+    if (releaseTimer) return;
+    releaseTimer = window.setTimeout(() => {
+        releaseTimer = 0;
+        if (!ownsStream) return;
+        const eng = MediaEngineStore?.getMediaEngine?.();
+        const state = eng ? readStreamAudioState(eng) : null;
+        if (state?.goLive) {
+            logger.info("Ignored transient stream-end; go-live still active", state.goLive);
+            return;
+        }
+        releaseOwnership("STREAM_DELETE/CLOSE settled");
+    }, 2500);
 }
 
 export function uninstallGoLiveGuard() {
+    clearReleaseTimer();
     clearAudioTimers();
     wantAudio = false;
+    onReleased = null;
     if (patchedModule && originalSetGoLiveSource) {
         patchedModule.setGoLiveSource = originalSetGoLiveSource;
     }

@@ -11,7 +11,12 @@ import { Compositor } from "../render/Compositor";
 import { readOutputSettings, resolveOutputSize } from "../settings";
 import type { LayoutDefinition } from "../types";
 import { performanceMonitor } from "../utils/PerformanceMonitor";
-import { beginNativeShare, endNativeShare, normalizeWindowSourceId } from "./GoLiveGuard";
+import {
+    beginNativeShare,
+    endNativeShare,
+    normalizeWindowSourceId,
+    setNativeShareReleaseHandler
+} from "./GoLiveGuard";
 
 const logger = new Logger("TripleScreen:StreamAdapter");
 
@@ -54,6 +59,14 @@ export class DiscordStreamAdapter {
     /** "screen" = system audio path; "window" = parked / video-only path. */
     private shareMode: "screen" | "window" | null = null;
     private shareSwitching = false;
+
+    constructor() {
+        setNativeShareReleaseHandler(() => {
+            if (this.cleaning || !this.expectingWindow) return;
+            logger.info("Go-live released — stopping TripleScreen composite");
+            void this.stop();
+        });
+    }
 
     subscribe(listener: StatusListener): () => void {
         this.listeners.add(listener);
@@ -288,15 +301,10 @@ export class DiscordStreamAdapter {
         this.screenGoLiveId = null;
         this.shareMode = "window";
 
+        // Apply once — delayed re-beginNativeShare restarts Discord capture (stream blips / audio gaps).
         const started = beginNativeShare(windowSourceId, quality, { includeSystemAudio: wantAudio });
-        if (wantAudio) {
-            logger.info("System audio pinned as soundshareId 1 on Output window (survives minimize/park)");
-            for (const ms of [400, 1200, 3000]) {
-                window.setTimeout(() => {
-                    if (!this.expectingWindow || gen !== this.generation || !this.windowSourceId) return;
-                    beginNativeShare(this.windowSourceId, quality, { includeSystemAudio: true });
-                }, ms);
-            }
+        if (wantAudio && started) {
+            logger.info("System audio pinned as soundshareId 1 on Output window (keepalive repairs only)");
         }
         return started;
     }
@@ -340,8 +348,7 @@ export class DiscordStreamAdapter {
     private watchOutputWindow() {
         this.stopWindowWatch();
         this.windowMisses = 0;
-        // Fast poll — minimize→park handshake must switch capture before the stage monitor blanks.
-        this.windowWatch = setInterval(() => void this.onOutputWindowClosed(), 100);
+        this.windowWatch = setInterval(() => void this.onOutputWindowClosed(), 500);
     }
 
     private stopWindowWatch() {
