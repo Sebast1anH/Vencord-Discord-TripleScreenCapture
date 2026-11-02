@@ -120,7 +120,7 @@ export function OutputSettingsPanel({ value, onChange }: Props) {
             </div>
 
             <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
-                System audio captures your default playback mix (YouTube, games, browsers) and excludes Discord itself, so viewers should not hear call voice or themselves. Every selected monitor is scaled into this one frame. Discord can still cap video, usually at 720p without Nitro and 1080p with Nitro.
+                System audio uses Discord&apos;s Entire Screen path (full mix, Discord voice excluded). TripleScreen fullscreens the composite on a stage monitor and shares that screen — prefer leaving one display unselected as the stage; otherwise the primary is used and dropped from the mosaic. Window-only share cannot do real system audio on Windows. Discord still caps video (often 720p without Nitro, 1080p with Nitro).
             </p>
         </div>
     );

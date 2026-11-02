@@ -15,17 +15,15 @@ const MediaEngineStore = findStoreLazy("MediaEngineStore");
 
 /**
  * Discord Windows soundshareId:
- *   1   = full default-output mix, with Discord's own process tree excluded
- *         (same path as Entire Screen + "Share system audio" — viewers should
- *         not hear Discord voice / themselves echoed)
- *   PID = that process tree only
+ *   1   = full default-output mix, Discord process tree excluded
+ *         (Entire Screen + "Share system audio")
+ *   PID = that process tree only (ActivateApplicationLoopbackFromPid)
  *
- * Never pin audio to Discord.exe's PID (the TripleScreen output window lives
- * inside it) — that captures call playback and makes friends hear themselves.
- *
- * Also never put soundshareId:1 on a window: go-live object; native capture can
- * reject that combo. Video uses the window id; audio is pinned with
- * setSoundshareSource(1, true) afterward.
+ * soundshareId:1 only works when the go-live *video* source is a screen /
+ * screen-handle. On window: sources Discord still binds process loopback to
+ * the window owner (Discord.exe for TripleScreen Output) — viewers hear
+ * themselves and miss YouTube. So with system audio we go live on the stage
+ * monitor (screen:…) with soundshareId:1 in the same payload.
  */
 const SYSTEM_AUDIO_ID = 1;
 
@@ -57,6 +55,7 @@ function scheduleAudio(fn: () => void, ms: number) {
         fn();
     }, ms);
     audioTimers.add(id);
+    return id;
 }
 
 function sourceIdOf(source: unknown): string {
@@ -86,9 +85,13 @@ function soundshareIdOf(source: unknown): number | null {
     return Number.isFinite(n) ? n : null;
 }
 
+function isScreenSourceId(id: string) {
+    const lower = id.toLowerCase();
+    return lower.startsWith("screen:") || lower.startsWith("screen-handle:");
+}
+
 function isScreenSource(source: unknown) {
-    const id = sourceIdOf(source).toLowerCase();
-    return id.startsWith("screen");
+    return isScreenSourceId(sourceIdOf(source));
 }
 
 function isWindows() {
@@ -109,8 +112,8 @@ function discordPid(): number | null {
     }
 }
 
-/** Video-only go-live payload. Audio is attached via setSoundshareSource(1). */
-function videoSource(windowId: string) {
+/** Window video only — never attach Discord PID as soundshare. */
+function windowVideoSource(windowId: string) {
     return {
         id: windowId,
         soundshareId: null,
@@ -118,10 +121,19 @@ function videoSource(windowId: string) {
     };
 }
 
-function desktopDescriptionVideo(id: string) {
+/** Screen + system mix (Discord excluded). Same shape as Entire Screen go-live. */
+function screenSystemAudioSource(screenId: string) {
+    return {
+        id: screenId,
+        soundshareId: SYSTEM_AUDIO_ID,
+        useLoopback: true
+    };
+}
+
+function desktopDescriptionFor(id: string, withSystemAudio: boolean) {
     return {
         id,
-        soundshareId: -1,
+        soundshareId: withSystemAudio && isScreenSourceId(id) ? SYSTEM_AUDIO_ID : -1,
         useLoopback: true,
         useVideoHook: false,
         useGraphicsCapture: true,
@@ -131,39 +143,54 @@ function desktopDescriptionVideo(id: string) {
     };
 }
 
-function retargetVideoOnly(source: unknown, windowId: string): unknown {
+function retargetToActive(source: unknown, activeId: string): unknown {
+    const screenAudio = wantSystemAudio() && isScreenSourceId(activeId);
     if (typeof source === "string" || !source || typeof source !== "object") {
-        return videoSource(windowId);
+        return screenAudio ? screenSystemAudioSource(activeId) : windowVideoSource(activeId);
     }
     const copy = { ...(source as Record<string, unknown>) };
-    copy.id = windowId;
-    // Strip Discord-PID audio if Discord tried to attach it to our window share.
-    const audioId = soundshareIdOf(source);
-    const selfPid = discordPid();
-    if (audioId != null && selfPid != null && audioId === selfPid) {
-        copy.soundshareId = null;
+    copy.id = activeId;
+    if (screenAudio) {
+        copy.soundshareId = SYSTEM_AUDIO_ID;
+    } else {
+        const audioId = soundshareIdOf(source);
+        const selfPid = discordPid();
+        if (audioId != null && selfPid != null && audioId === selfPid) {
+            copy.soundshareId = null;
+        } else if (audioId === SYSTEM_AUDIO_ID && !isScreenSourceId(activeId)) {
+            // window + 1 is ignored/broken natively — leave null and let caller decide
+            copy.soundshareId = null;
+        }
     }
     if (copy.desktopSource && typeof copy.desktopSource === "object") {
-        const ds = { ...(copy.desktopSource as Record<string, unknown>), id: windowId };
-        if (selfPid != null && Number(ds.soundshareId) === selfPid) ds.soundshareId = null;
+        const ds = { ...(copy.desktopSource as Record<string, unknown>), id: activeId };
+        if (screenAudio) ds.soundshareId = SYSTEM_AUDIO_ID;
+        else if (discordPid() != null && Number(ds.soundshareId) === discordPid()) ds.soundshareId = null;
         copy.desktopSource = ds;
     }
     if (copy.desktopDescription && typeof copy.desktopDescription === "object") {
-        const dd = { ...(copy.desktopDescription as Record<string, unknown>), id: windowId };
-        if (selfPid != null && Number(dd.soundshareId) === selfPid) dd.soundshareId = -1;
+        const dd = { ...(copy.desktopDescription as Record<string, unknown>), id: activeId };
+        if (screenAudio) dd.soundshareId = SYSTEM_AUDIO_ID;
+        else if (discordPid() != null && Number(dd.soundshareId) === discordPid()) dd.soundshareId = -1;
         copy.desktopDescription = dd;
     }
     return copy;
 }
 
 /**
- * Pin stream audio to the full Windows mix (Discord voice excluded by Discord's
- * system-soundshare path). Never pass Discord's own PID.
+ * Re-assert screen + soundshareId:1. setSoundshareSource(1) alone is not enough
+ * for window: sources; for screen: it reinforces Discord's system path.
  */
 function enableSystemAudio(engine: any) {
-    if (!wantSystemAudio() || !engine) return;
+    if (!wantSystemAudio() || !engine || !activeOutputId || !isScreenSourceId(activeOutputId)) return;
 
-    const selfPid = discordPid();
+    withBypass(() => {
+        try {
+            engine.setGoLiveSource(screenSystemAudioSource(activeOutputId!), "stream");
+        } catch (err) {
+            logger.warn("Re-apply screen system-audio go-live failed", err);
+        }
+    });
 
     try {
         if (typeof engine.setSoundshareSource === "function") {
@@ -182,25 +209,9 @@ function enableSystemAudio(engine: any) {
             logger.warn("Connection setSoundshareSource(1) failed", err);
         }
     }
-
-    // If Discord somehow re-bound to our PID, force system again once more.
-    if (selfPid != null) {
-        try {
-            const active = Number(
-                (engine as any).getSoundshareSource?.()
-                ?? (engine as any).soundshareId
-                ?? 0
-            );
-            if (active === selfPid && typeof engine.setSoundshareSource === "function") {
-                logger.info("Replaced Discord PID soundshare with full system mix (excludes Discord)");
-                engine.setSoundshareSource(SYSTEM_AUDIO_ID, true, "stream");
-            }
-        } catch { /* optional getter */ }
-    }
 }
 
 function scheduleSystemAudioKeepalive() {
-    // Only re-pin soundshare — do not re-call setGoLiveSource (that killed audio before).
     for (const ms of [200, 500, 1000, 2000, 4000, 8000]) {
         scheduleAudio(() => {
             if (!ownsStream || !activeOutputId || !wantSystemAudio()) return;
@@ -209,31 +220,40 @@ function scheduleSystemAudioKeepalive() {
     }
 }
 
-/** Points Discord's encoder at the composite window, then pins system audio (no Discord voice). */
+/**
+ * Points Discord's encoder at the composite.
+ * Prefer a screen: id with soundshareId:1 when system audio is on.
+ * Fall back to window: video-only when no stage screen is available.
+ */
 export function beginNativeShare(
-    windowSourceId: string,
+    videoSourceId: string,
     quality?: { resolution: number; frameRate: number; },
     options?: { includeSystemAudio?: boolean; }
 ) {
     const engine = MediaEngineStore?.getMediaEngine?.();
-    if (!engine?.setGoLiveSource || !windowSourceId) {
+    if (!engine?.setGoLiveSource || !videoSourceId) {
         logger.warn("Media engine is not ready to go live");
         return false;
     }
 
     const wantAudio = (options?.includeSystemAudio ?? readOutputSettings().includeSystemAudio) && isWindows();
+    const useScreenAudio = wantAudio && isScreenSourceId(videoSourceId);
     const chosen = {
         resolution: quality?.resolution ?? 1080,
         frameRate: quality?.frameRate ?? 30
     };
 
-    activeOutputId = windowSourceId;
+    activeOutputId = videoSourceId;
     ownsStream = true;
     clearAudioTimers();
 
+    const payload = useScreenAudio
+        ? screenSystemAudioSource(videoSourceId)
+        : windowVideoSource(videoSourceId);
+
     withBypass(() => {
         try {
-            engine.setGoLiveSource(videoSource(windowSourceId), "stream");
+            engine.setGoLiveSource(payload, "stream");
         } catch (err) {
             logger.warn("Flat go-live source failed, trying desktopDescription", err);
             for (const conn of [...(engine.connections ?? [])]) {
@@ -242,7 +262,7 @@ export function beginNativeShare(
                 try {
                     conn.setGoLiveSource({
                         quality: chosen,
-                        desktopDescription: desktopDescriptionVideo(windowSourceId)
+                        desktopDescription: desktopDescriptionFor(videoSourceId, useScreenAudio)
                     });
                 } catch (inner) {
                     logger.warn("Connection go-live failed", inner);
@@ -251,17 +271,25 @@ export function beginNativeShare(
         }
     });
 
-    if (wantAudio) {
-        enableSystemAudio(engine);
+    if (useScreenAudio) {
+        try {
+            if (typeof engine.setSoundshareSource === "function") {
+                engine.setSoundshareSource(SYSTEM_AUDIO_ID, true, "stream");
+            }
+        } catch { /* optional */ }
         scheduleSystemAudioKeepalive();
+    } else if (wantAudio) {
+        logger.warn(
+            "System audio needs a stage monitor (screen go-live). Window share would bind Discord PID loopback — streaming video only."
+        );
     }
 
     logger.info(
-        "Requested Discord go live for composite window",
-        windowSourceId,
+        "Requested Discord go live",
+        videoSourceId,
         chosen,
-        wantAudio
-            ? `system audio via setSoundshareSource(1), Discord PID ${discordPid() ?? "?"} excluded`
+        useScreenAudio
+            ? "system audio via screen + soundshareId:1 (Discord excluded)"
             : "video only"
     );
     return true;
@@ -311,12 +339,25 @@ export function installGoLiveGuard() {
                 return originalSetGoLiveSource!.apply(this, args);
             }
 
-            if (activeOutputId && ownsStream && isScreenSource(source)) {
-                logger.info("Kept TripleScreen as the go-live video instead of", sourceIdOf(source));
+            if (activeOutputId && ownsStream && isScreenSource(source) && !isScreenSourceId(activeOutputId)) {
+                // User/Discord picked a screen while we own a window composite — keep window video.
+                logger.info("Kept TripleScreen window as go-live video instead of", sourceIdOf(source));
                 const result = withBypass(() =>
                     originalSetGoLiveSource!.call(
                         this,
-                        retargetVideoOnly(source, activeOutputId!),
+                        retargetToActive(source, activeOutputId!),
+                        context ?? "stream"
+                    )
+                );
+                return result;
+            }
+
+            if (activeOutputId && ownsStream && isScreenSource(source) && isScreenSourceId(activeOutputId)) {
+                // Keep our stage screen + system audio instead of Discord's pick.
+                const result = withBypass(() =>
+                    originalSetGoLiveSource!.call(
+                        this,
+                        retargetToActive(source, activeOutputId!),
                         context ?? "stream"
                     )
                 );
@@ -331,12 +372,13 @@ export function installGoLiveGuard() {
                     activeOutputId = null;
                     clearAudioTimers();
                 } else if (nextId === activeOutputId) {
-                    // Discord re-applied our window, often with Discord PID audio — strip that, then pin system mix.
-                    const cleaned = retargetVideoOnly(source, activeOutputId);
+                    const cleaned = retargetToActive(source, activeOutputId);
                     const result = withBypass(() =>
                         originalSetGoLiveSource!.call(this, cleaned, context ?? "stream")
                     );
-                    enableSystemAudio(MediaEngineStore?.getMediaEngine?.());
+                    if (wantSystemAudio() && isScreenSourceId(activeOutputId)) {
+                        enableSystemAudio(MediaEngineStore?.getMediaEngine?.());
+                    }
                     return result;
                 }
             }
@@ -344,7 +386,7 @@ export function installGoLiveGuard() {
             return originalSetGoLiveSource!.apply(this, args);
         };
         patched = true;
-        logger.info("Go Live guard ready (system audio, Discord excluded)");
+        logger.info("Go Live guard ready (screen-stage system audio)");
     });
 
     FluxDispatcher.subscribe("STREAM_DELETE", onStreamGone as any);

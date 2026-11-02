@@ -104,6 +104,39 @@ const OUTPUT_PARTITION = "triplescreen-output";
 let outputWindow: import("electron").BrowserWindow | null = null;
 let pageReady: Promise<void> | null = null;
 let captureSessionReady = false;
+/** When set, output is fullscreen on this Electron display id (screen go-live for system audio). */
+let stageDisplayId: number | null = null;
+
+function findDisplayForScreenId(screenId: string | undefined | null) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { screen } = require("electron") as typeof import("electron");
+    const displays = screen.getAllDisplays();
+    if (!screenId) return null;
+    // Match screen:<electronDisplayId>:0 or screen:<index>:0 from listScreens.
+    const parts = screenId.split(":");
+    const mid = parts[1];
+    if (mid && /^\d+$/.test(mid)) {
+        const byId = displays.find(d => String(d.id) === mid);
+        if (byId) return byId;
+        const idx = Number(mid);
+        if (Number.isFinite(idx) && displays[idx]) return displays[idx];
+    }
+    return null;
+}
+
+async function resolveScreenIdForDisplay(display: import("electron").Display): Promise<string> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const electron = require("electron") as typeof import("electron");
+    const sources = await electron.desktopCapturer.getSources({
+        types: ["screen"],
+        thumbnailSize: { width: 0, height: 0 },
+        fetchWindowIcons: false
+    });
+    const match = sources.find(item => (item as { display_id?: string; }).display_id === String(display.id))
+        ?? sources.find(item => item.id === `screen:${display.id}:0`)
+        ?? sources.find(item => item.id.split(":")[1] === String(display.id));
+    return match?.id ?? `screen:${display.id}:0`;
+}
 
 /** Discord's default session denies desktop capture for any window but its own. */
 function prepareCaptureSession() {
@@ -252,32 +285,54 @@ function ensureOutputHtmlFile() {
     return file;
 }
 
+export interface OpenOutputOptions {
+    /** Electron/Discord screen id to fullscreen onto for system-audio go-live. */
+    stageScreenId?: string | null;
+}
+
 /**
- * The window Discord actually shares. It has to stay on-screen: an off-screen
- * window is captured as whichever monitor is behind it. Closing it ends the composite.
+ * Opens the TripleScreen Output window.
+ * - Normal: floating window Discord shares as window:…
+ * - Stage: fullscreen on a monitor Discord shares as screen:… + soundshareId 1
  */
-export function openOutputWindow(_event: IpcMainInvokeEvent, width: number, height: number, frameRate?: number) {
+export async function openOutputWindow(
+    _event: IpcMainInvokeEvent,
+    width: number,
+    height: number,
+    frameRate?: number,
+    options?: OpenOutputOptions
+) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { BrowserWindow, screen } = require("electron") as typeof import("electron");
     prepareCaptureSession();
     const canvasW = clampInt(width, 640, 2560);
     const canvasH = clampInt(height, 360, 1440);
-    const area = screen.getPrimaryDisplay().workArea;
-    // Window can be smaller than the canvas; the page scales with object-fit via CSS 100%.
-    const maxW = Math.max(320, area.width - 48);
-    const maxH = Math.max(240, area.height - 48);
-    const scale = Math.min(1, maxW / canvasW, maxH / canvasH);
-    const w = Math.max(320, Math.round(canvasW * scale));
-    const h = Math.max(240, Math.round(canvasH * scale));
+    void frameRate;
+
+    const stageDisplay = findDisplayForScreenId(options?.stageScreenId ?? null);
+    stageDisplayId = stageDisplay?.id ?? null;
+
+    const area = (stageDisplay ?? screen.getPrimaryDisplay()).workArea;
+    const maxW = Math.max(320, area.width - (stageDisplay ? 0 : 48));
+    const maxH = Math.max(240, area.height - (stageDisplay ? 0 : 48));
+    const scale = stageDisplay ? 1 : Math.min(1, maxW / canvasW, maxH / canvasH);
+    const w = stageDisplay
+        ? Math.max(320, stageDisplay.bounds.width)
+        : Math.max(320, Math.round(canvasW * scale));
+    const h = stageDisplay
+        ? Math.max(240, stageDisplay.bounds.height)
+        : Math.max(240, Math.round(canvasH * scale));
+
     if (!outputWindow || outputWindow.isDestroyed()) {
         const win = new BrowserWindow({
             width: w,
             height: h,
             title: OUTPUT_TITLE,
             show: false,
-            frame: true,
+            frame: !stageDisplay,
+            fullscreen: !!stageDisplay,
             resizable: false,
-            minimizable: true,
+            minimizable: !stageDisplay,
             maximizable: false,
             skipTaskbar: false,
             backgroundColor: "#000000",
@@ -296,17 +351,24 @@ export function openOutputWindow(_event: IpcMainInvokeEvent, width: number, heig
         win.on("closed", () => {
             if (outputWindow === win) outputWindow = null;
             pageReady = null;
+            stageDisplayId = null;
         });
         win.on("minimize", () => {
             setImmediate(() => {
                 if (!win || win.isDestroyed() || outputWindow !== win) return;
+                // Stage must stay painted fullscreen for screen capture.
+                if (stageDisplayId != null) {
+                    if (win.isMinimized()) win.restore();
+                    win.setFullScreen(true);
+                    return;
+                }
                 parkOutputWindow(win);
             });
         });
         win.on("focus", () => {
             if (outputWindow !== win || win.isDestroyed()) return;
             win.setIgnoreMouseEvents(false);
-            win.moveTop();
+            if (stageDisplayId == null) win.moveTop();
         });
         pageReady = new Promise((resolve, reject) => {
             win.webContents.once("did-finish-load", () => resolve());
@@ -320,21 +382,45 @@ export function openOutputWindow(_event: IpcMainInvokeEvent, width: number, heig
         outputWindow.setContentProtection(false);
         outputWindow.webContents.setBackgroundThrottling(false);
     }
-    void frameRate;
-    outputWindow.setContentSize(w, h);
-    const [bw, bh] = outputWindow.getSize();
-    const x = area.x + Math.max(0, Math.round((area.width - bw) / 2));
-    const y = area.y + Math.max(0, Math.round((area.height - bh) / 2));
-    outputWindow.setPosition(x, y);
+
+    let screenSourceId: string | null = null;
+    if (stageDisplay) {
+        outputWindow.setFullScreen(false);
+        outputWindow.setBounds({
+            x: stageDisplay.bounds.x,
+            y: stageDisplay.bounds.y,
+            width: stageDisplay.bounds.width,
+            height: stageDisplay.bounds.height
+        });
+        outputWindow.setFullScreen(true);
+        screenSourceId = options?.stageScreenId && findDisplayForScreenId(options.stageScreenId)?.id === stageDisplay.id
+            ? String(options.stageScreenId)
+            : await resolveScreenIdForDisplay(stageDisplay);
+    } else {
+        if (outputWindow.isFullScreen()) outputWindow.setFullScreen(false);
+        outputWindow.setContentSize(w, h);
+        const [bw, bh] = outputWindow.getSize();
+        const x = area.x + Math.max(0, Math.round((area.width - bw) / 2));
+        const y = area.y + Math.max(0, Math.round((area.height - bh) / 2));
+        outputWindow.setPosition(x, y);
+    }
+
     outputWindow.showInactive();
-    outputWindow.moveTop();
+    if (!stageDisplay) outputWindow.moveTop();
+
     let sourceId: string | null = null;
     try {
         sourceId = outputWindow.getMediaSourceId();
     } catch {
         sourceId = null;
     }
-    return { width: canvasW, height: canvasH, sourceId };
+    return {
+        width: canvasW,
+        height: canvasH,
+        sourceId,
+        screenSourceId,
+        stageDisplayId
+    };
 }
 
 export function isOutputWindowOpen(_event: IpcMainInvokeEvent) {
@@ -422,8 +508,12 @@ export async function closeOutputWindow(_event: IpcMainInvokeEvent) {
     if (!win || win.isDestroyed()) {
         outputWindow = null;
         pageReady = null;
+        stageDisplayId = null;
         return true;
     }
+    try {
+        if (win.isFullScreen()) win.setFullScreen(false);
+    } catch { /* ignore */ }
     await new Promise<void>(resolve => {
         win.once("closed", () => resolve());
         win.close();
@@ -431,6 +521,7 @@ export async function closeOutputWindow(_event: IpcMainInvokeEvent) {
     });
     if (outputWindow === win) outputWindow = null;
     pageReady = null;
+    stageDisplayId = null;
     return true;
 }
 

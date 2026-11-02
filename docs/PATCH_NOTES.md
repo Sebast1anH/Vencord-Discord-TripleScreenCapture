@@ -4,6 +4,22 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — System audio via stage monitor
+
+### Fixed
+- **System audio / self-echo:** `window:` go-live cannot use Discord’s full-mix `soundshareId: 1` (native still loopbacks Discord.exe → friends hear themselves, no YouTube). TripleScreen now fullscreens the composite on a **stage monitor** and calls `setGoLiveSource` with that `screen:…` id **and** `soundshareId: 1` (same path as Entire Screen + Share system audio).
+
+### Changed
+- Stage pick order: unused (unselected) display first; otherwise steal primary when ≥2 displays exist
+- Stage monitor is excluded from the mosaic to avoid recursive capture
+- Single-display setups fall back to window video without system audio (logged)
+- Settings blurb documents the stage-monitor requirement
+
+### Known issues
+- With every monitor selected and no spare display, one monitor becomes the stage and is omitted from the mosaic while system audio is on
+
+---
+
 ## 2026-11-02 — Docs & public repo hygiene
 
 ### Added
@@ -16,7 +32,7 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 - Plugin README points at the root setup guide
 
 ### Known issues
-- **System audio:** viewers may still hear Discord call echo (themselves) and miss YouTube/other apps when the share is bound to Discord’s process audio. Fix in progress — pin full system soundshare without Discord PID loopback.
+- **System audio:** addressed in the newer “stage monitor” entry above
 
 ---
 
