@@ -315,12 +315,20 @@ export class DiscordStreamAdapter {
         }
 
         this.shareMode = audioOn ? "screen" : "window";
+        // Always start from the Output window first so Discord creates a stream connection,
+        // then immediately upgrade to stage screen + soundshareId 1 (CDP-proven order).
+        if (audioOn && this.windowSourceId) {
+            beginNativeShare(this.windowSourceId, quality, { includeSystemAudio: false });
+            await sleep(300);
+            if (gen !== this.generation || !this.expectingWindow) return "closed" as const;
+        }
         const started = beginNativeShare(goLiveId, quality, { includeSystemAudio: audioOn });
         if (audioOn) {
-            for (const ms of [400, 1200, 2500]) {
+            for (const ms of [500, 1200, 2500, 5000]) {
                 window.setTimeout(() => {
                     if (!this.expectingWindow || gen !== this.generation || this.shareMode !== "screen") return;
-                    beginNativeShare(goLiveId, quality, { includeSystemAudio: true });
+                    if (!this.screenGoLiveId) return;
+                    beginNativeShare(this.screenGoLiveId, quality, { includeSystemAudio: true });
                 }, ms);
             }
         }

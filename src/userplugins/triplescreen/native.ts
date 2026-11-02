@@ -805,8 +805,9 @@ export async function closeOutputWindow(_event: IpcMainInvokeEvent) {
 }
 
 /**
- * Exit stage fullscreen, shrink to floating size, park behind other windows.
+ * Shrink in place on the current monitor and park behind other windows.
  * Keeps the BrowserWindow painted so Discord window: capture still shows the mosaic.
+ * Does NOT jump to the primary monitor.
  */
 function parkForMinimize(win: import("electron").BrowserWindow) {
     outputParked = true;
@@ -815,14 +816,19 @@ function parkForMinimize(win: import("electron").BrowserWindow) {
         if (win.isFullScreen()) win.setFullScreen(false);
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { screen } = require("electron") as typeof import("electron");
-        const area = screen.getPrimaryDisplay().workArea;
-        const fw = Math.max(320, floatingSize.width);
-        const fh = Math.max(240, floatingSize.height);
+        const current = win.getBounds();
+        const display = (stageDisplayId != null
+            ? screen.getAllDisplays().find(d => d.id === stageDisplayId)
+            : null) ?? screen.getDisplayMatching(current);
+        const area = display.workArea;
+        const fw = Math.min(Math.max(320, floatingSize.width), area.width);
+        const fh = Math.min(Math.max(240, floatingSize.height), area.height);
         win.setContentSize(fw, fh);
         const [bw, bh] = win.getSize();
+        // Keep on the same monitor (corner), not teleport to primary.
         win.setPosition(
-            area.x + Math.max(0, Math.round((area.width - bw) / 2)),
-            area.y + Math.max(0, Math.round((area.height - bh) / 2))
+            area.x + Math.max(0, area.width - bw - 16),
+            area.y + Math.max(0, area.height - bh - 16)
         );
     } catch { /* park anyway */ }
     parkOutputWindow(win);

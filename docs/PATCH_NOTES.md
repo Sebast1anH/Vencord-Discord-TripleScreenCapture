@@ -4,6 +4,17 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Park stays on same monitor; bootstrap stream then screen audio
+
+### Fixed
+- **Minimize jumped to main monitor:** Park now shrinks in-place on the current/stage display (corner), not the primary.
+- **No self-echo and no system audio (silence):** Likely stuck on `window:` with `soundshareId: -1`. Start with a short window go-live so the stream connection exists, then upgrade to stage `screen:` + `soundshareId: 1`, with repair if Discord falls off that state.
+
+### Changed
+- Minimize still switches to window capture before park (avoids blank screen share)
+
+---
+
 ## 2026-11-02 — Minimize: no exclusive fullscreen; switch capture before park
 
 ### Fixed

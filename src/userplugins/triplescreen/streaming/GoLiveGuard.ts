@@ -151,9 +151,30 @@ function retargetToActive(source: unknown, activeId: string): unknown {
     return goLiveOptions(activeId, screenAudio, q);
 }
 
+function streamConn(engine: any) {
+    return [...(engine?.connections ?? [])].find(
+        (c: any) => c.context === "stream" || c.streamUserId
+    ) ?? null;
+}
+
+function readStreamAudioState(engine: any) {
+    const c = streamConn(engine);
+    if (!c) return null;
+    return {
+        goLive: String(c.goLiveSourceIdentifier ?? ""),
+        soundshareId: c.soundshareId,
+        soundshareActive: !!c.soundshareActive
+    };
+}
+
+function logAudio(tag: string, extra?: unknown) {
+    logger.info(tag, extra);
+}
+
 function applyGoLive(engine: any, sourceId: string, withSystemAudio: boolean) {
     const options = goLiveOptions(sourceId, withSystemAudio, lastQuality);
     let applied = false;
+    const wantScreenAudio = withSystemAudio && isScreenSourceId(sourceId);
 
     for (const conn of [...(engine?.connections ?? [])]) {
         if (conn.context !== "stream" && !conn.streamUserId) continue;
@@ -164,7 +185,7 @@ function applyGoLive(engine: any, sourceId: string, withSystemAudio: boolean) {
         } catch (err) {
             logger.warn("Connection setGoLiveSource failed", err);
         }
-        if (withSystemAudio && isScreenSourceId(sourceId) && typeof conn.setSoundshareSource === "function") {
+        if (wantScreenAudio && typeof conn.setSoundshareSource === "function") {
             try {
                 conn.setSoundshareSource(SYSTEM_AUDIO_ID, true);
             } catch { /* optional */ }
@@ -180,7 +201,7 @@ function applyGoLive(engine: any, sourceId: string, withSystemAudio: boolean) {
         }
     }
 
-    if (withSystemAudio && isScreenSourceId(sourceId) && typeof engine?.setSoundshareSource === "function") {
+    if (wantScreenAudio && typeof engine?.setSoundshareSource === "function") {
         try {
             engine.setSoundshareSource(SYSTEM_AUDIO_ID, true, "stream");
         } catch {
@@ -190,6 +211,8 @@ function applyGoLive(engine: any, sourceId: string, withSystemAudio: boolean) {
         }
     }
 
+    const state = readStreamAudioState(engine);
+    logAudio("applyGoLive", { sourceId, withSystemAudio, wantScreenAudio, applied, state });
     return applied;
 }
 
@@ -197,6 +220,19 @@ function reinforceScreenAudio(engine: any) {
     if (!wantSystemAudio() || !engine || !activeOutputId || !isScreenSourceId(activeOutputId)) return;
     withBypass(() => {
         applyGoLive(engine, activeOutputId!, true);
+        // Repair: window share or non-1 soundshare means viewers get silence / Discord PID — not system mix.
+        const state = readStreamAudioState(engine);
+        if (!state) return;
+        const onScreen = state.goLive.toLowerCase().startsWith("screen:")
+            || state.goLive.toLowerCase().startsWith("screen-handle:");
+        if (!onScreen || state.soundshareId !== SYSTEM_AUDIO_ID || !state.soundshareActive) {
+            logAudio("repairScreenAudio", state);
+            applyGoLive(engine, activeOutputId!, true);
+            const conn = streamConn(engine);
+            try {
+                conn?.setSoundshareSource?.(SYSTEM_AUDIO_ID, true);
+            } catch { /* optional */ }
+        }
     });
 }
 
