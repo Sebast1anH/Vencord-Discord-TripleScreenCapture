@@ -165,7 +165,7 @@ async function resolveScreenIdForDisplay(display: import("electron").Display): P
 /** Discord's default session denies desktop capture for any window but its own. */
 function prepareCaptureSession() {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { session, desktopCapturer } = require("electron") as typeof import("electron");
+    const { session } = require("electron") as typeof import("electron");
     const ses = session.fromPartition(OUTPUT_PARTITION);
     if (captureSessionReady) return ses;
     captureSessionReady = true;
@@ -177,43 +177,10 @@ function prepareCaptureSession() {
     ses.setPermissionRequestHandler((_wc, permission, callback) => callback(allow(String(permission))));
     const extended = ses as typeof ses & {
         setDevicePermissionHandler?: (handler: (details: { deviceType?: string; }) => boolean) => void;
-        setDisplayMediaRequestHandler?: (
-            handler: (
-                request: unknown,
-                callback: (streams: { video?: unknown; audio?: string; } | null) => void
-            ) => void
-        ) => void;
     };
     extended.setDevicePermissionHandler?.(details => {
         const type = String(details?.deviceType || "");
         return type === "media" || type === "display-capture" || type === "";
-    });
-    // System audio for the Output page: exclude Chromium/Discord so we can mirror
-    // YouTube/games into Discord.exe without feedback, then window soundshare picks it up.
-    extended.setDisplayMediaRequestHandler?.(async (_request, callback) => {
-        try {
-            const sources = await desktopCapturer.getSources({
-                types: ["screen"],
-                thumbnailSize: { width: 0, height: 0 }
-            });
-            const video = sources[0];
-            if (!video) {
-                callback(null);
-                return;
-            }
-            // Prefer loopbackWithoutChrome (no Discord/Electron in the mix). Fallback: loopback.
-            callback({ video, audio: "loopbackWithoutChrome" });
-        } catch {
-            try {
-                const sources = await desktopCapturer.getSources({
-                    types: ["screen"],
-                    thumbnailSize: { width: 0, height: 0 }
-                });
-                callback(sources[0] ? { video: sources[0], audio: "loopback" } : null);
-            } catch {
-                callback(null);
-            }
-        }
     });
     return ses;
 }
@@ -278,58 +245,6 @@ function loadBgImage(url) {
 }
 
 const pending = new Map();
-let audioEl = null;
-let audioStream = null;
-
-async function startAudioMirror() {
-  stopAudioMirror();
-  const media = navigator.mediaDevices;
-  if (!media) throw new Error("mediaDevices unavailable");
-  let stream = null;
-  // Prefer getDisplayMedia so Electron can grant loopbackWithoutChrome (no Discord in mix).
-  if (typeof media.getDisplayMedia === "function") {
-    try {
-      stream = await media.getDisplayMedia({
-        video: true,
-        audio: { restrictOwnAudio: true, suppressLocalAudioPlayback: false }
-      });
-    } catch (e1) {
-      try {
-        stream = await media.getDisplayMedia({ video: true, audio: true });
-      } catch (e2) {
-        throw e2;
-      }
-    }
-  }
-  if (!stream) throw new Error("getDisplayMedia unavailable");
-  // Drop video — we only need system audio mirrored into this Discord process.
-  for (const t of stream.getVideoTracks()) {
-    try { t.stop(); } catch (_) {}
-    stream.removeTrack(t);
-  }
-  if (!stream.getAudioTracks().length) throw new Error("No system audio track (loopback denied?)");
-  audioStream = stream;
-  audioEl = document.createElement("audio");
-  audioEl.autoplay = true;
-  audioEl.playsInline = true;
-  audioEl.srcObject = stream;
-  audioEl.style.cssText = "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none";
-  document.body.appendChild(audioEl);
-  await audioEl.play();
-  return { ok: true, tracks: stream.getAudioTracks().length };
-}
-
-function stopAudioMirror() {
-  try {
-    if (audioStream) audioStream.getTracks().forEach(t => t.stop());
-  } catch (_) {}
-  audioStream = null;
-  if (audioEl) {
-    try { audioEl.pause(); audioEl.remove(); } catch (_) {}
-  }
-  audioEl = null;
-  return { ok: true };
-}
 
 async function ensureVideo(id) {
   if (videos.has(id)) return videos.get(id);
@@ -472,15 +387,6 @@ window.__tsFreeze = function (ids) {
     done.push(id);
   }
   return { ok: done.length > 0, frozen: done };
-};
-
-/** Mirror system audio (excluding Discord) into this window so Discord window soundshare hears apps. */
-window.__tsAudioMirror = function (enable) {
-  if (!enable) return Promise.resolve(stopAudioMirror());
-  return startAudioMirror().catch(err => ({
-    ok: false,
-    error: err && err.message ? err.message : String(err)
-  }));
 };
 </script></body></html>`;
 
@@ -733,23 +639,6 @@ export async function configureOutput(_event: IpcMainInvokeEvent, config: unknow
         return result ?? { ok: false, videos: 0, errors: ["Output page did not start"] };
     } catch (err) {
         return { ok: false, videos: 0, errors: [err instanceof Error ? err.message : String(err)] };
-    }
-}
-
-/** Start/stop system-audio mirror inside the Output page (loopbackWithoutChrome → play in Discord.exe). */
-export async function setOutputAudioMirror(_event: IpcMainInvokeEvent, enable: boolean) {
-    if (!outputWindow || outputWindow.isDestroyed()) {
-        return { ok: false, error: "Output window is not open" };
-    }
-    try {
-        if (pageReady) await pageReady;
-        const result = await outputWindow.webContents.executeJavaScript(
-            `window.__tsAudioMirror(${enable ? "true" : "false"})`,
-            true
-        );
-        return result ?? { ok: false, error: "Audio mirror call failed" };
-    } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
 }
 

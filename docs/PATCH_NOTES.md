@@ -4,15 +4,22 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
-## 2026-11-02 — Output window mirrors system audio (no Discord echo)
+## 2026-11-02 — Revert audio mirror; restore stage screen system mix
 
 ### Fixed
-- **Silence / wrong audio:** Window go-live had `soundshareId: -1` (no stream audio). Now uses Discord PID soundshare on the Output window.
-- Output mirrors desktop mix via `loopbackWithoutChrome` (YouTube/games, not Discord) into Discord.exe so viewers hear apps.
-- Self-deafen while streaming so call audio is not in process loopback (no self-echo). Undeafen on stop.
+- **Local echo of system audio:** Removed Output `loopbackWithoutChrome` mirror playback (you heard apps twice).
+- **Friends still heard only Discord / themselves:** Window + Discord PID soundshare cannot carry YouTube/games. Restored **stage screen go-live** (`screen:` + `soundshareId: 1`) — Discord’s Entire-Screen mix, which excludes call audio.
+- All selected monitors stay in the mosaic; the stage display tile is frozen so it does not recurse.
 
 ### Changed
-- System audio no longer depends on stage screen go-live; the Output window is what Discord shares.
+- With system audio on, Output covers one display (framed, not exclusive fullscreen) so Discord can screen-capture it. Minimize parks to window capture (audio pauses until you focus Output again).
+
+---
+
+## 2026-11-02 — Output window mirrors system audio (no Discord echo) — REVERTED
+
+### Known issues
+- This approach failed live: local mirror playback + viewers still Discord-only. Superseded by stage screen go-live above.
 
 ---
 
