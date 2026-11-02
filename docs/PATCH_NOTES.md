@@ -4,6 +4,18 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — System audio: Nightcord clear + screen bootstrap
+
+### Fixed
+- **System audio only Discord:** `setSoundshareSource(0, true)` was treated as success and skipped the real entire-system call `setSoundshareSource(null, false)` (Nightcord). PID filter never cleared → Discord.exe loopback only
+- Go-live window payload now sets `soundshareId: 1` when system audio is on
+- Brief Discord-native **screen** go-live bootstrap activates desktop loopback, then video switches to the Output window (all monitors stay in the mosaic)
+
+### Changed
+- `docs/AUDIT.md` rewritten for this audio investigation
+
+---
+
 ## 2026-11-02 — Crash fix + background resize preview
 
 ### Fixed

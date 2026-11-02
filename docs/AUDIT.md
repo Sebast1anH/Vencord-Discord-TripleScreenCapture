@@ -1,52 +1,39 @@
-# TripleScreen audit — 2026-11-02 (full pass)
+# TripleScreen audit — 2026-11-02 (audio + full pass)
 
-Review of `src/userplugins/triplescreen` after stage-monitor system audio and composite teardown fixes.
+## Architecture
 
-## Architecture (current)
+1. Layout editor selects N monitors → **Start**.
+2. Native **TripleScreen Output** window composites every selected monitor (`file://` page + `getUserMedia`).
+3. `GoLiveGuard.beginNativeShare` points Discord at that **window** (full mosaic).
+4. **System audio (Windows):**
+   1. Brief go-live on a Discord-native `screen:` / `screen-handle:` with `soundshareId: 1` (wakes desktop loopback).
+   2. Switch video to the Output window with `soundshareId: 1`.
+   3. `setSoundshareSource(null, false)` clears the single-PID filter (Nightcord “Entire System” — **not** `(0, true)`).
+5. Stop / close Output tears down.
 
-1. User opens Discord Screen Share → **TripleScreen** tab (or modal / slash / context menu).
-2. **Start** opens native **TripleScreen Output**:
-   - **Video only:** floating `window:` share of the output BrowserWindow.
-   - **System audio (Windows):** fullscreen composite on a **stage** monitor; Discord go-live uses that `screen:…` id with `soundshareId: 1` (Entire Screen path — Discord process excluded from the mix).
-3. Output page (`file://` temp HTML) captures each mosaic monitor via `getUserMedia(chromeMediaSourceId)` and paints a canvas.
-4. `GoLiveGuard` owns `setGoLiveSource` while streaming; closing the output window or a durable stream-end signal tears the composite down.
-
-## Findings
+## Findings this pass
 
 | ID | Severity | Status | Finding |
 |----|----------|--------|---------|
-| B1 | High | **Fixed** | Output compositor always painted at 60 Hz (`setInterval(1000/60)`); `cfg.fps` ignored → wasted GPU and mismatched user FPS setting. Now `armDraw(cfg.fps)`. |
-| B2 | High | **Fixed** | `streamStillLive()` treated *any* MediaEngine `stream` connection as alive, so the composite could linger after Discord moved the encoder off TripleScreen (or never tear down cleanly). Now requires native-share ownership and matching `goLiveSourceIdentifier` when present. |
-| B3 | High | **Fixed** | Switching stage ↔ window mode reused a BrowserWindow created with the wrong `frame` / fullscreen chrome (constructor-only options). Mode changes now `destroy()` and recreate the window. |
-| B4 | Medium | **Fixed** | Ended desktop-capture tracks removed their video and stayed black until the next layout apply. Track `onended` now re-calls `ensureVideo`. |
-| B5 | Medium | **Fixed** | `installGoLiveGuard` re-subscribed `STREAM_DELETE` / `STREAM_CLOSE` on every call (duplicate handlers after plugin reload). Guarded with `streamEventsBound`. |
-| B6 | Medium | **Fixed** | Status / settings copy still said viewers always see the Output *window*; with system audio they see the stage screen. Updated modal + plugin about text; added `stage-screen` injection mode. |
-| B7 | Medium | **Fixed** | `lowerBehind` HWND path did not validate numeric-only before PowerShell interpolation (defense in depth). |
-| B8 | Low | **Fixed** | Dead `reapplyTimer` field after removing delayed second `beginNativeShare`. |
-| B9 | Low | Accepted | Minimize parking still uses short PowerShell `SetWindowPos` (HWND digits only). Native addon preferred long-term. |
-| B10 | Low | Accepted | Picker tab is DOM/`MutationObserver` based — may need retuning if Discord redesigns the segmented control. |
-| B11 | Info | Open | When system audio steals a selected monitor as stage, that display is omitted from the mosaic (no auto-reflow of remaining tiles — custom layouts keep their positions). |
-| B12 | Info | Open | Discord still caps encoder resolution/FPS (Nitro / server limits); plugin requests settings but cannot guarantee output. |
-| B13 | Info | Open | Single-display + system audio cannot use stage path → window video only (logged). |
-| A1–A12 | — | Prior | See earlier audit sections / patch notes (picker labels, `file://` origin, stream-end grace, permission narrowing, duplicate capture skip, etc.). |
+| C1 | Critical | **Fixed** | System audio only captured Discord. We called `setSoundshareSource(0, true)` first; it “succeeds” but does **not** enable full desktop loopback, so the Nightcord `(null, false)` clear never ran. |
+| C2 | Critical | **Fixed** | Window share of Discord-owned Output defaults to Discord.exe PID loopback. Now: screen bootstrap + `soundshareId: 1` on window payload + PID-filter clear. |
+| C3 | High | Fixed earlier | Auto stream-end teardown killed composites after a few seconds. |
+| C4 | Medium | **Fixed** | Background image had no resize/pan or stream-frame preview (added prior; verified in this pass). |
+| C5 | Medium | Accepted | Unused stage-fullscreen path still exists in `native.ts` (no longer called). Safe to delete in a cleanup PR. |
+| C6 | Low | Accepted | Picker tab is DOM/`MutationObserver` based. |
+| C7 | Low | Accepted | Minimize park uses PowerShell `SetWindowPos` (HWND digits only). |
+| C8 | Info | Open | Discord encoder still caps resolution/FPS (Nitro / server). |
+| C9 | Info | Open | If Discord changes `setSoundshareSource` semantics, re-verify with CDP (`soundshareId` / friends hearing apps). |
 
-## Verification checklist
+## Verification
 
-- [x] Plugin builds under Vencord (`pnpm build`)
-- [x] Native helpers expose `listScreens`, `openOutputWindow` (+ stage), `configureOutput`
-- [x] Go-live guard: no `setGoLiveSource` in audio keepalive; stream-event subscribe once
-- [x] Output page honors FPS; track-end recovery
-- [ ] Manual: Start with system audio + spare monitor → stage fullscreen, viewers hear apps not Discord echo
-- [ ] Manual: Start without system audio → floating window share stays up
-- [ ] Manual: Stop in Discord UI → TripleScreen releases within ~10s after guard
-- [ ] Manual: Close output/stage window → TripleScreen stops
-- [ ] Manual: Minimize floating output → parked (not blank); stage restores fullscreen
+- [x] Build (`pnpm build` in Vencord)
+- [ ] Manual: Select all monitors + system audio → Start in voice → viewers hear YouTube/games, not Discord echo
+- [ ] Manual: Stream stays up >30s without auto-stop
+- [ ] Manual: Background preview matches Output window letterbox/crop
 
-## Files touched this pass
+## Files touched
 
-- `native.ts` — FPS-aware paint, track reacquire, stage mode recreate, HWND validation
-- `streaming/GoLiveGuard.ts` — ownership exports, single stream-event bind, quality best-effort
-- `streaming/DiscordStreamAdapter.ts` — stricter live check, `stage-screen` mode, dead timer removed
-- `ui/TripleScreenModal.tsx` / `index.tsx` — accurate status and about copy
-- `docs/AUDIT.md` — this document
-- `docs/PATCH_NOTES.md` — dated changelog entry
+- `streaming/GoLiveGuard.ts` — Nightcord audio clear + screen bootstrap
+- `streaming/DiscordStreamAdapter.ts` — DiscordNative screen id for bootstrap
+- `docs/AUDIT.md`, `docs/PATCH_NOTES.md`

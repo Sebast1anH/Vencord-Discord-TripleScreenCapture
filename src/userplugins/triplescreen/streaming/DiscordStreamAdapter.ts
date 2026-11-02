@@ -213,7 +213,7 @@ export class DiscordStreamAdapter {
         if (!native) return false;
 
         // Always share the Output *window* so every selected monitor stays in the mosaic.
-        // System audio is pinned via setSoundshareSource(0|1) after go-live — no stage monitor.
+        // System audio: screen bootstrap + setSoundshareSource(null, false) — no sacrificed stage.
         this.liveMosaicLayout = layout;
 
         const opened = await native.openOutputWindow(width, height, fps);
@@ -266,10 +266,12 @@ export class DiscordStreamAdapter {
             resolution: discordResolution(height),
             frameRate: fps
         };
-        const audio = {
-            includeSystemAudio: readOutputSettings().includeSystemAudio !== false && isWindowsPlatform()
-        };
-        return beginNativeShare(windowSourceId, quality, audio);
+        const wantAudio = readOutputSettings().includeSystemAudio !== false && isWindowsPlatform();
+        const bootstrapScreenId = wantAudio ? await resolveDiscordScreenId() : null;
+        return beginNativeShare(windowSourceId, quality, {
+            includeSystemAudio: wantAudio,
+            bootstrapScreenId
+        });
     }
 
     private outputPayload(layout: LayoutDefinition) {
@@ -366,6 +368,25 @@ function discordResolution(height: number) {
 function isWindowsPlatform() {
     return (DiscordNative as any)?.process?.platform === "win32"
         || navigator.userAgent.includes("Windows");
+}
+
+/** Discord-native screen id for system-audio bootstrap (not Electron's). */
+async function resolveDiscordScreenId(): Promise<string | null> {
+    try {
+        const api = window.DiscordNative?.desktopCapture;
+        if (!api?.getDesktopCaptureSources) return null;
+        const sources = await api.getDesktopCaptureSources({
+            types: ["screen"],
+            thumbnailSize: { width: 0, height: 0 }
+        });
+        if (!sources.length) return null;
+        // Prefer a real screen: / screen-handle: id Discord's MediaEngine accepts.
+        const handle = sources.find(s => s.id.toLowerCase().startsWith("screen-handle:"));
+        if (handle) return handle.id;
+        return sources[0]?.id ?? null;
+    } catch {
+        return null;
+    }
 }
 
 function nativeHelpers() {
