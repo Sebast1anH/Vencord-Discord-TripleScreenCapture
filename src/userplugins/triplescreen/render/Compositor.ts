@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import type { CaptureFrame, LayoutDefinition, MonitorLayoutItem, ScaleMode } from "../types";
+import type { BackgroundImageFit, CaptureFrame, LayoutDefinition, MonitorLayoutItem, ScaleMode } from "../types";
 import { performanceMonitor } from "../utils/PerformanceMonitor";
 
 export interface CompositorOptions {
@@ -12,6 +12,8 @@ export interface CompositorOptions {
     height: number;
     frameRate: number;
     backgroundColor: string;
+    backgroundImageDataUrl?: string;
+    backgroundImageFit?: BackgroundImageFit;
 }
 
 /**
@@ -28,6 +30,8 @@ export class Compositor {
     private lastFrameAt = 0;
     private stream: MediaStream | null = null;
     private frameProvider: (() => CaptureFrame[]) | null = null;
+    private bgImage: HTMLImageElement | null = null;
+    private bgImageUrl = "";
 
     constructor(options: CompositorOptions) {
         this.options = options;
@@ -40,6 +44,7 @@ export class Compositor {
         ctx.imageSmoothingQuality = "high";
         this.ctx = ctx;
         performanceMonitor.setOutputSize(options.width, options.height);
+        void this.ensureBackgroundImage(options.backgroundImageDataUrl);
     }
 
     setLayout(layout: LayoutDefinition) {
@@ -54,6 +59,33 @@ export class Compositor {
         if (partial.width) this.canvas.width = partial.width;
         if (partial.height) this.canvas.height = partial.height;
         performanceMonitor.setOutputSize(this.canvas.width, this.canvas.height);
+        if (partial.backgroundImageDataUrl !== undefined) {
+            void this.ensureBackgroundImage(partial.backgroundImageDataUrl);
+        }
+    }
+
+    private async ensureBackgroundImage(url?: string) {
+        const next = url || "";
+        if (!next) {
+            this.bgImage = null;
+            this.bgImageUrl = "";
+            return;
+        }
+        if (next === this.bgImageUrl && this.bgImage?.complete) return;
+        this.bgImageUrl = next;
+        await new Promise<void>(resolve => {
+            const img = new Image();
+            img.onload = () => {
+                this.bgImage = img;
+                resolve();
+            };
+            img.onerror = () => {
+                this.bgImage = null;
+                this.bgImageUrl = "";
+                resolve();
+            };
+            img.src = next;
+        });
     }
 
     getOptions(): CompositorOptions {
@@ -104,13 +136,20 @@ export class Compositor {
     }
 
     renderOnce(frames: CaptureFrame[]) {
-        const { width, height, backgroundColor } = {
-            width: this.canvas.width,
-            height: this.canvas.height,
-            backgroundColor: this.options.backgroundColor
-        };
-        this.ctx.fillStyle = backgroundColor || "#000";
+        const width = this.canvas.width;
+        const height = this.canvas.height;
+        this.ctx.fillStyle = this.options.backgroundColor || "#000";
         this.ctx.fillRect(0, 0, width, height);
+        if (this.bgImage?.naturalWidth) {
+            const dest = backgroundDest(
+                this.options.backgroundImageFit || "fill",
+                this.bgImage.naturalWidth,
+                this.bgImage.naturalHeight,
+                width,
+                height
+            );
+            this.ctx.drawImage(this.bgImage, dest.x, dest.y, dest.w, dest.h);
+        }
 
         if (!this.layout) return;
 
@@ -186,4 +225,23 @@ function computeDestRect(
         w,
         h
     };
+}
+
+function backgroundDest(
+    fit: BackgroundImageFit,
+    srcW: number,
+    srcH: number,
+    canvasW: number,
+    canvasH: number
+) {
+    if (fit === "stretch") return { x: 0, y: 0, w: canvasW, h: canvasH };
+    if (fit === "center") {
+        return { x: (canvasW - srcW) / 2, y: (canvasH - srcH) / 2, w: srcW, h: srcH };
+    }
+    const scale = fit === "fill"
+        ? Math.max(canvasW / srcW, canvasH / srcH)
+        : Math.min(canvasW / srcW, canvasH / srcH);
+    const w = srcW * scale;
+    const h = srcH * scale;
+    return { x: (canvasW - w) / 2, y: (canvasH - h) / 2, w, h };
 }

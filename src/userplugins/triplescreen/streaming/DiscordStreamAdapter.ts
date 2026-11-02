@@ -102,11 +102,14 @@ export class DiscordStreamAdapter {
 
             // Editor compositor is optional preview. The native output window is what Discord shares.
             // Skip a second getUserMedia pass when native helpers exist — doubles GPU load otherwise.
+            const outputSettings = readOutputSettings();
             this.compositor = new Compositor({
                 width: output.width,
                 height: output.height,
                 frameRate: Math.min(30, fps),
-                backgroundColor: activeLayout.backgroundColor || readOutputSettings().backgroundColor
+                backgroundColor: activeLayout.backgroundColor || outputSettings.backgroundColor,
+                backgroundImageDataUrl: outputSettings.backgroundImageDataUrl,
+                backgroundImageFit: outputSettings.backgroundImageFit
             });
             this.compositor.setLayout(activeLayout);
             const native = nativeHelpers();
@@ -168,7 +171,13 @@ export class DiscordStreamAdapter {
             }
             : layout;
         this.liveMosaicLayout = mosaic;
+        const outputSettings = readOutputSettings();
         this.compositor?.setLayout(mosaic);
+        this.compositor?.setOptions({
+            backgroundColor: layout.backgroundColor || outputSettings.backgroundColor,
+            backgroundImageDataUrl: outputSettings.backgroundImageDataUrl,
+            backgroundImageFit: outputSettings.backgroundImageFit
+        });
         layoutManager.upsert(layout);
         if (!this.expectingWindow) return;
         if (this.layoutTimer) window.clearTimeout(this.layoutTimer);
@@ -317,11 +326,14 @@ export class DiscordStreamAdapter {
     }
 
     private outputPayload(layout: LayoutDefinition) {
+        const output = readOutputSettings();
         return {
             width: this.canvasWidth,
             height: this.canvasHeight,
             fps: this.liveFps,
-            background: layout.backgroundColor || "#000000",
+            background: layout.backgroundColor || output.backgroundColor || "#000000",
+            backgroundImage: output.backgroundImageDataUrl || "",
+            backgroundFit: output.backgroundImageFit || "fill",
             items: layout.monitors
                 .filter(item => item.visible && item.selected)
                 .map(item => ({

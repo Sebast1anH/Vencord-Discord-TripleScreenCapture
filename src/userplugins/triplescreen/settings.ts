@@ -7,7 +7,7 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
-import type { FrameRatePreset, LayoutDefinition, OutputSettings, ScaleMode } from "./types";
+import type { BackgroundImageFit, FrameRatePreset, LayoutDefinition, OutputSettings, ScaleMode } from "./types";
 
 export const DEFAULT_OUTPUT: OutputSettings = {
     resolutionPreset: "1080p",
@@ -16,10 +16,15 @@ export const DEFAULT_OUTPUT: OutputSettings = {
     frameRate: 30,
     scaleModeDefault: "fit",
     backgroundColor: "#0b1020",
+    backgroundImageDataUrl: "",
+    backgroundImageFit: "fill",
     snapToGrid: true,
     gridSize: 16,
     includeSystemAudio: true
 };
+
+/** Cap persisted background images so settings JSON stays manageable. */
+export const BACKGROUND_IMAGE_MAX_CHARS = 900_000;
 
 export function resolveOutputSize(settings: OutputSettings): { width: number; height: number; } {
     switch (settings.resolutionPreset) {
@@ -79,8 +84,24 @@ export const settings = definePluginSettings({
     },
     backgroundColor: {
         type: OptionType.STRING,
-        description: "Background color for empty canvas regions",
+        description: "Background color for empty canvas regions (under the image if set)",
         default: "#0b1020"
+    },
+    backgroundImageDataUrl: {
+        type: OptionType.STRING,
+        description: "Custom background image (data URL)",
+        default: "",
+        hidden: true
+    },
+    backgroundImageFit: {
+        type: OptionType.SELECT,
+        description: "How the custom background image fills the canvas",
+        options: [
+            { label: "Fill (crop)", value: "fill" as BackgroundImageFit, default: true },
+            { label: "Fit (letterbox)", value: "fit" as BackgroundImageFit },
+            { label: "Stretch", value: "stretch" as BackgroundImageFit },
+            { label: "Center (no scale)", value: "center" as BackgroundImageFit }
+        ]
     },
     snapToGrid: {
         type: OptionType.BOOLEAN,
@@ -137,6 +158,18 @@ export function normalizeFrameRate(value: unknown): FrameRatePreset {
     return 15;
 }
 
+function normalizeBackgroundImageFit(value: unknown): BackgroundImageFit {
+    if (value === "fit" || value === "fill" || value === "stretch" || value === "center") return value;
+    return "fill";
+}
+
+function sanitizeBackgroundImageDataUrl(value: unknown): string {
+    if (typeof value !== "string" || !value) return "";
+    if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(value)) return "";
+    if (value.length > BACKGROUND_IMAGE_MAX_CHARS) return "";
+    return value;
+}
+
 export function readOutputSettings(): OutputSettings {
     const store = settings.store;
     return {
@@ -146,10 +179,48 @@ export function readOutputSettings(): OutputSettings {
         frameRate: normalizeFrameRate(store.frameRate),
         scaleModeDefault: store.scaleModeDefault as ScaleMode,
         backgroundColor: store.backgroundColor || DEFAULT_OUTPUT.backgroundColor,
+        backgroundImageDataUrl: sanitizeBackgroundImageDataUrl(store.backgroundImageDataUrl),
+        backgroundImageFit: normalizeBackgroundImageFit(store.backgroundImageFit),
         snapToGrid: store.snapToGrid,
         gridSize: store.gridSize || 16,
         includeSystemAudio: store.includeSystemAudio !== false
     };
+}
+
+/**
+ * Reads a local image file, downscales to ≤1920×1080, and returns a JPEG data URL
+ * suitable for settings + the output compositor.
+ */
+export async function encodeBackgroundImageFile(file: File): Promise<string> {
+    if (!file.type.startsWith("image/")) {
+        throw new Error("Choose a PNG, JPEG, or WebP image.");
+    }
+    const bitmap = await createImageBitmap(file);
+    try {
+        const maxW = 1920;
+        const maxH = 1080;
+        const scale = Math.min(1, maxW / bitmap.width, maxH / bitmap.height);
+        const w = Math.max(1, Math.round(bitmap.width * scale));
+        const h = Math.max(1, Math.round(bitmap.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("Could not prepare the background image.");
+        ctx.drawImage(bitmap, 0, 0, w, h);
+        let quality = 0.85;
+        let dataUrl = canvas.toDataURL("image/jpeg", quality);
+        while (dataUrl.length > BACKGROUND_IMAGE_MAX_CHARS && quality > 0.45) {
+            quality -= 0.1;
+            dataUrl = canvas.toDataURL("image/jpeg", quality);
+        }
+        if (dataUrl.length > BACKGROUND_IMAGE_MAX_CHARS) {
+            throw new Error("Image is too large after compression. Try a smaller file.");
+        }
+        return dataUrl;
+    } finally {
+        bitmap.close();
+    }
 }
 
 export function loadSavedLayouts(): LayoutDefinition[] {

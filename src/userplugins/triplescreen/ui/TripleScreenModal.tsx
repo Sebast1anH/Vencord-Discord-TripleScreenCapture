@@ -106,9 +106,15 @@ function TripleScreenModal({ modalProps }: { modalProps: ModalProps; }) {
         settings.store.frameRate = next.frameRate;
         settings.store.scaleModeDefault = next.scaleModeDefault;
         settings.store.backgroundColor = next.backgroundColor;
+        settings.store.backgroundImageDataUrl = next.backgroundImageDataUrl || "";
+        settings.store.backgroundImageFit = next.backgroundImageFit;
         settings.store.snapToGrid = next.snapToGrid;
         settings.store.gridSize = next.gridSize;
         settings.store.includeSystemAudio = next.includeSystemAudio;
+        const liveLayout = layout;
+        if (discordStreamAdapter.getStatus().state === "streaming" && liveLayout) {
+            discordStreamAdapter.updateLayout(liveLayout);
+        }
     };
 
     const onPreset = (preset: LayoutPresetId) => {

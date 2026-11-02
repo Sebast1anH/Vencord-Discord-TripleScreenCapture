@@ -59,6 +59,9 @@ export interface LayoutDefinition {
     updatedAt: number;
 }
 
+/** How a custom background image is drawn behind the monitor mosaic. */
+export type BackgroundImageFit = ScaleMode | "center";
+
 export interface OutputSettings {
     resolutionPreset: OutputResolutionPreset;
     customWidth: number;
@@ -66,6 +69,9 @@ export interface OutputSettings {
     frameRate: FrameRatePreset;
     scaleModeDefault: ScaleMode;
     backgroundColor: string;
+    /** Compressed data URL (image/jpeg|png|webp) or empty when using solid color only. */
+    backgroundImageDataUrl: string;
+    backgroundImageFit: BackgroundImageFit;
     snapToGrid: boolean;
     gridSize: number;
     includeSystemAudio: boolean;

@@ -171,6 +171,8 @@ ctx.imageSmoothingEnabled = true;
 ctx.imageSmoothingQuality = "high";
 const videos = new Map();
 let cfg = null;
+let bgImage = null;
+let bgImageUrl = "";
 
 function destRect(item, srcW, srcH) {
   if (item.scaleMode === "stretch") return { x: item.x, y: item.y, w: item.width, h: item.height };
@@ -179,6 +181,34 @@ function destRect(item, srcW, srcH) {
     : Math.min(item.width / srcW, item.height / srcH);
   const w = srcW * scale, h = srcH * scale;
   return { x: item.x + (item.width - w) / 2, y: item.y + (item.height - h) / 2, w: w, h: h };
+}
+
+function bgDest(fit, srcW, srcH, canvasW, canvasH) {
+  if (fit === "stretch") return { x: 0, y: 0, w: canvasW, h: canvasH };
+  if (fit === "center") {
+    return { x: (canvasW - srcW) / 2, y: (canvasH - srcH) / 2, w: srcW, h: srcH };
+  }
+  const scale = fit === "fill"
+    ? Math.max(canvasW / srcW, canvasH / srcH)
+    : Math.min(canvasW / srcW, canvasH / srcH);
+  const w = srcW * scale, h = srcH * scale;
+  return { x: (canvasW - w) / 2, y: (canvasH - h) / 2, w: w, h: h };
+}
+
+function loadBgImage(url) {
+  if (!url) {
+    bgImage = null;
+    bgImageUrl = "";
+    return Promise.resolve();
+  }
+  if (url === bgImageUrl && bgImage && bgImage.complete) return Promise.resolve();
+  bgImageUrl = url;
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => { bgImage = img; resolve(); };
+    img.onerror = () => { bgImage = null; bgImageUrl = ""; resolve(); };
+    img.src = url;
+  });
 }
 
 const pending = new Map();
@@ -226,6 +256,10 @@ function draw() {
   if (height > 0 && canvas.height !== height) canvas.height = height;
   ctx.fillStyle = cfg.background || "#000";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (bgImage && bgImage.naturalWidth) {
+    const dest = bgDest(cfg.backgroundFit || "fill", bgImage.naturalWidth, bgImage.naturalHeight, canvas.width, canvas.height);
+    ctx.drawImage(bgImage, dest.x, dest.y, dest.w, dest.h);
+  }
   const items = (cfg.items || []).slice().sort((a, b) => (a.z || 0) - (b.z || 0));
   for (const item of items) {
     const video = videos.get(item.sourceId);
@@ -262,6 +296,7 @@ window.__tsApply = function (next) {
   applyChain = applyChain.then(async () => {
     cfg = next;
     armDraw(next && next.fps);
+    await loadBgImage(next && next.backgroundImage ? String(next.backgroundImage) : "");
     const ids = [...new Set((next.items || []).map(item => item.sourceId).filter(Boolean))];
     const errors = [];
     for (const id of ids) {
@@ -477,6 +512,9 @@ function sanitizeOutputConfig(config: unknown) {
             }
         });
     }
+    const backgroundImage = sanitizeBackgroundImage(raw.backgroundImage);
+    const fitRaw = String(raw.backgroundFit || "fill");
+    const backgroundFit = ["fit", "fill", "stretch", "center"].includes(fitRaw) ? fitRaw : "fill";
     return {
         width: clampInt(Number(raw.width), 320, 2560),
         height: clampInt(Number(raw.height), 180, 1440),
@@ -484,8 +522,18 @@ function sanitizeOutputConfig(config: unknown) {
         background: typeof raw.background === "string" && /^#[0-9a-fA-F]{6}$/.test(raw.background)
             ? raw.background
             : "#000000",
+        backgroundImage,
+        backgroundFit,
         items
     };
+}
+
+function sanitizeBackgroundImage(value: unknown) {
+    if (typeof value !== "string" || !value) return "";
+    // Only in-memory data URLs — never remote http(s) into the output page.
+    if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(value)) return "";
+    if (value.length > 900_000) return "";
+    return value;
 }
 
 export async function configureOutput(_event: IpcMainInvokeEvent, config: unknown) {

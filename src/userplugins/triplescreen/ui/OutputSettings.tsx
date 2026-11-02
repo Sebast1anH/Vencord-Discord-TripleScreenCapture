@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { React } from "@webpack/common";
+import { React, useRef, useState } from "@webpack/common";
 
-import type { FrameRatePreset, OutputSettings, ScaleMode } from "../types";
+import { encodeBackgroundImageFile } from "../settings";
+import type { BackgroundImageFit, FrameRatePreset, OutputSettings, ScaleMode } from "../types";
 
 interface Props {
     value: OutputSettings;
@@ -15,6 +16,24 @@ interface Props {
 
 export function OutputSettingsPanel({ value, onChange }: Props) {
     const patch = (partial: Partial<OutputSettings>) => onChange({ ...value, ...partial });
+    const fileRef = useRef<HTMLInputElement | null>(null);
+    const [imageError, setImageError] = useState<string | null>(null);
+    const [imageBusy, setImageBusy] = useState(false);
+
+    const onPickImage = async (file: File | undefined) => {
+        if (!file) return;
+        setImageBusy(true);
+        setImageError(null);
+        try {
+            const dataUrl = await encodeBackgroundImageFile(file);
+            patch({ backgroundImageDataUrl: dataUrl });
+        } catch (err) {
+            setImageError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setImageBusy(false);
+            if (fileRef.current) fileRef.current.value = "";
+        }
+    };
 
     return (
         <div className="triplescreen-panel">
@@ -88,7 +107,7 @@ export function OutputSettingsPanel({ value, onChange }: Props) {
             </div>
 
             <div className="triplescreen-field">
-                <label htmlFor="ts-bg">Background</label>
+                <label htmlFor="ts-bg">Background color</label>
                 <input
                     id="ts-bg"
                     type="color"
@@ -96,6 +115,74 @@ export function OutputSettingsPanel({ value, onChange }: Props) {
                     onChange={e => patch({ backgroundColor: e.target.value })}
                 />
             </div>
+
+            <div className="triplescreen-field">
+                <label>Background image</label>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                    <input
+                        ref={fileRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        style={{ display: "none" }}
+                        onChange={e => void onPickImage(e.target.files?.[0])}
+                    />
+                    <button
+                        type="button"
+                        disabled={imageBusy}
+                        onClick={() => fileRef.current?.click()}
+                    >
+                        {imageBusy ? "Loading…" : value.backgroundImageDataUrl ? "Replace image" : "Choose image"}
+                    </button>
+                    {value.backgroundImageDataUrl ? (
+                        <button
+                            type="button"
+                            className="danger"
+                            disabled={imageBusy}
+                            onClick={() => {
+                                setImageError(null);
+                                patch({ backgroundImageDataUrl: "" });
+                            }}
+                        >
+                            Clear
+                        </button>
+                    ) : null}
+                </div>
+                {value.backgroundImageDataUrl ? (
+                    <img
+                        src={value.backgroundImageDataUrl}
+                        alt="Background preview"
+                        style={{
+                            marginTop: 8,
+                            width: "100%",
+                            maxHeight: 96,
+                            objectFit: "cover",
+                            borderRadius: 6,
+                            border: "1px solid var(--background-modifier-accent, #3f4147)"
+                        }}
+                    />
+                ) : null}
+                {imageError ? (
+                    <p style={{ fontSize: 11, color: "var(--text-danger, #f23f43)", margin: "6px 0 0" }}>
+                        {imageError}
+                    </p>
+                ) : null}
+            </div>
+
+            {value.backgroundImageDataUrl ? (
+                <div className="triplescreen-field">
+                    <label htmlFor="ts-bg-fit">Background image fit</label>
+                    <select
+                        id="ts-bg-fit"
+                        value={value.backgroundImageFit}
+                        onChange={e => patch({ backgroundImageFit: e.target.value as BackgroundImageFit })}
+                    >
+                        <option value="fill">Fill (crop)</option>
+                        <option value="fit">Fit (letterbox)</option>
+                        <option value="stretch">Stretch</option>
+                        <option value="center">Center (original size)</option>
+                    </select>
+                </div>
+            ) : null}
 
             <div className="triplescreen-field">
                 <label>
@@ -120,7 +207,9 @@ export function OutputSettingsPanel({ value, onChange }: Props) {
             </div>
 
             <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
-                System audio uses Discord&apos;s Entire Screen path (full mix, Discord voice excluded). TripleScreen fullscreens the composite on a stage monitor and shares that screen — prefer leaving one display unselected as the stage; otherwise the primary is used and dropped from the mosaic. Window-only share cannot do real system audio on Windows. Discord still caps video (often 720p without Nitro, 1080p with Nitro).
+                Custom background images fill empty canvas areas behind your monitors (color shows through letterboxing).
+                System audio uses a stage monitor with Discord&apos;s Entire Screen path. Discord still caps video
+                (often 720p without Nitro, 1080p with Nitro).
             </p>
         </div>
     );

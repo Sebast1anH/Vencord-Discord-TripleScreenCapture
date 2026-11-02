@@ -4,6 +4,15 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Custom background image
+
+### Added
+- Output setting to choose a custom background image (PNG/JPEG/WebP) behind the monitor mosaic
+- Fit modes: fill, fit, stretch, center (solid background color still shows in letterbox gaps)
+- Images are downscaled/compressed for settings storage and drawn on the live TripleScreen Output canvas (and editor compositor)
+
+---
+
 ## 2026-11-02 — Full audit pass
 
 ### Fixed
