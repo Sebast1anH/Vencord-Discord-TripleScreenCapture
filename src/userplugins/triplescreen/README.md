@@ -6,17 +6,19 @@ Viewers do **not** need this plugin.
 
 ## Install
 
-This folder must live at:
+1. Clone this repository:  
+   `git clone https://github.com/Sebast1anH/Vencord-Discord-TripleScreenCapture.git`
+2. Copy this folder to:
 
 ```text
 Vencord/src/userplugins/triplescreen/
 ```
 
-Then rebuild Vencord (`pnpm build`) and fully restart Discord.
+3. Rebuild Vencord (`pnpm build`) and fully restart Discord.
 
 **Important:** the official Vencord installer does **not** load `userplugins`. You need a [source build](https://docs.vencord.dev/installing/).
 
-For the full setup guide, architecture, audio notes, and troubleshooting, see the repository root [`README.md`](../../../README.md).
+For the full setup guide (including downloading this repo, Vencord inject, audio notes, and troubleshooting), see the repository root [`README.md`](../../../README.md).
 
 ## Quick usage
 

@@ -55,7 +55,20 @@ Viewers do **not** need the plugin.
 
 3. Install **Git** if you don’t already have it.
 
-### 2. Build Vencord from source
+### 2. Download this repository
+
+Clone TripleScreen (or download the ZIP from GitHub and extract it):
+
+```powershell
+git clone https://github.com/Sebast1anH/Vencord-Discord-TripleScreenCapture.git
+cd Vencord-Discord-TripleScreenCapture
+```
+
+ZIP alternative: open the repo on GitHub → **Code → Download ZIP** → extract somewhere convenient, then open that folder in PowerShell (`cd` into it).
+
+You will need this folder in step 4 when copying the plugin into Vencord.
+
+### 3. Build Vencord from source
 
 Official installer builds **cannot** load custom `userplugins`. Follow the upstream guide:
 
@@ -64,6 +77,7 @@ Official installer builds **cannot** load custom `userplugins`. Follow the upstr
 Typical flow on Windows (PowerShell):
 
 ```powershell
+# From a parent folder (e.g. next to TripleScreen), not inside the TripleScreen clone
 git clone https://github.com/Vendicated/Vencord.git
 cd Vencord
 pnpm install
@@ -75,26 +89,34 @@ pnpm inject
 
 Confirm Vencord works: open Discord → **Settings → Vencord**. You should see the Vencord settings pane.
 
-### 3. Install TripleScreen into Vencord
+### 4. Install TripleScreen into Vencord
 
-From this repository, copy the plugin folder into your Vencord tree:
+Copy the plugin from this repo into your Vencord tree. Adjust the paths if your folders are elsewhere:
 
 ```powershell
-# Adjust paths if your clones live elsewhere
+# Example: both repos live under the same parent folder
+Copy-Item -Recurse -Force `
+  .\Vencord-Discord-TripleScreenCapture\src\userplugins\triplescreen `
+  .\Vencord\src\userplugins\triplescreen
+```
+
+If your current directory is already the TripleScreen clone:
+
+```powershell
 Copy-Item -Recurse -Force `
   .\src\userplugins\triplescreen `
-  .\Vencord\src\userplugins\triplescreen
+  ..\Vencord\src\userplugins\triplescreen
 ```
 
 Or manually:
 
 1. Create `Vencord/src/userplugins/` if it does not exist.
-2. Copy the entire `triplescreen` folder so you have:
+2. Copy the entire `triplescreen` folder from this repo so you have:
 
    `Vencord/src/userplugins/triplescreen/index.tsx`  
    (and the rest of the plugin files next to it)
 
-### 4. Rebuild and restart Discord
+### 5. Rebuild and restart Discord
 
 ```powershell
 cd Vencord
@@ -103,7 +125,7 @@ pnpm build
 
 Then **fully restart Discord** (Quit Discord → start again). A normal window close is not enough if Discord stays in the tray.
 
-### 5. Enable the plugin
+### 6. Enable the plugin
 
 1. Discord → **User Settings → Vencord → Plugins**
 2. Find **TripleScreen** and enable it
@@ -115,7 +137,7 @@ Then **fully restart Discord** (Quit Discord → start again). A normal window c
    - Performance overlay while configuring
    - Chat bar button (restart needed if you toggle it)
 
-### 6. Go live with multiple monitors
+### 7. Go live with multiple monitors
 
 1. Join a **voice channel** or call.
 2. Open TripleScreen using any of:
@@ -130,7 +152,7 @@ Then **fully restart Discord** (Quit Discord → start again). A normal window c
 7. A window titled **TripleScreen Output** appears — that is what Discord encodes. Leave it open while streaming.
 8. Ask a friend to confirm they see **all** selected monitors and hear system audio (not Discord call echo).
 
-### 7. Stopping
+### 8. Stopping
 
 Use any of:
 
@@ -140,12 +162,14 @@ Use any of:
 
 Capture and the output window are released when the composite stops.
 
-### 8. Updating the plugin later
+### 9. Updating the plugin later
 
 ```powershell
-# After pulling new TripleScreen changes into this repo:
-Copy-Item -Recurse -Force .\src\userplugins\triplescreen .\Vencord\src\userplugins\triplescreen
-cd Vencord
+cd Vencord-Discord-TripleScreenCapture
+git pull
+
+Copy-Item -Recurse -Force .\src\userplugins\triplescreen ..\Vencord\src\userplugins\triplescreen
+cd ..\Vencord
 pnpm build
 # Fully restart Discord
 ```
