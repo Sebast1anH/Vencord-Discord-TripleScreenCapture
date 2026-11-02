@@ -39,6 +39,7 @@ Viewers do **not** need the plugin.
 | `preview/` | Optional browser demo of the layout editor |
 | `docs/FEASIBILITY.md` | Early MediaEngine research notes |
 | `docs/AUDIT.md` | Recent audit findings and fixes |
+| `docs/PATCH_NOTES.md` | Changelog / patch notes for each fix push |
 
 ---
 
@@ -237,7 +238,8 @@ Open the URL Vite prints (default [http://127.0.0.1:47321](http://127.0.0.1:4732
 | Low FPS | Discord negotiation, GPU load, or covered output window — keep output on-screen or minimized via park |
 | Normal screen share broken | Disable TripleScreen, restart Discord; file an issue with Vencord + Discord version |
 
-More audit detail: [`docs/AUDIT.md`](docs/AUDIT.md).
+More audit detail: [`docs/AUDIT.md`](docs/AUDIT.md).  
+Release-style fix log: [`docs/PATCH_NOTES.md`](docs/PATCH_NOTES.md).
 
 ---
 
