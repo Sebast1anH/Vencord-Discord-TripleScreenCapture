@@ -4,6 +4,18 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Hold stage screen against window steal; restore minimize park
+
+### Fixed
+- **System audio still Discord-only after stage:** Discord re-picks the Output `window:` after we set `screen:` + `soundshareId: 1`. The go-live guard used to **drop ownership** on that switch, leaving Discord.exe process loopback (friends hear themselves). Guard now always forces the stage screen back.
+- **Minimize blocked:** Stage mode restored fullscreen on every minimize. Minimize now exits exclusive fullscreen, keeps the mosaic covering the stage display, and parks behind other windows (same park path as before).
+
+### Changed
+- Stage host prefers a non-primary monitor when possible
+- Go-live prefers connection `desktopDescription` (Discord Entire-Screen shape)
+
+---
+
 ## 2026-11-02 — System audio: screen-stage go-live (evidence fix)
 
 ### Fixed

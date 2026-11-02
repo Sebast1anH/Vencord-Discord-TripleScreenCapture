@@ -457,8 +457,8 @@ async function pickStageScreen(
         const spare = unused.find(s => !s.isPrimary) ?? unused[0];
         return { screenId: spare.id };
     }
-    if (screens.length < 1) return null;
-    const host = screens.find(s => s.isPrimary && selectedIds.includes(s.id))
+    // Prefer a non-primary selected display so the main Discord UI monitor stays free.
+    const host = screens.find(s => !s.isPrimary && selectedIds.includes(s.id))
         ?? screens.find(s => selectedIds.includes(s.id))
         ?? screens[0];
     return host ? { screenId: host.id } : null;

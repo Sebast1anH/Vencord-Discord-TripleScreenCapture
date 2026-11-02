@@ -463,11 +463,24 @@ export async function openOutputWindow(
         win.on("minimize", () => {
             setImmediate(() => {
                 if (!win || win.isDestroyed() || outputWindow !== win) return;
-                // Stage must stay painted fullscreen for screen capture.
+                if (win.isMinimized()) win.restore();
+                // Stage: leave exclusive fullscreen so Z-order park works, but keep covering
+                // the stage display so Discord screen go-live still sees the mosaic.
                 if (stageDisplayId != null) {
-                    if (win.isMinimized()) win.restore();
-                    win.setFullScreen(true);
-                    return;
+                    try {
+                        // eslint-disable-next-line @typescript-eslint/no-require-imports
+                        const { screen } = require("electron") as typeof import("electron");
+                        const display = screen.getAllDisplays().find(d => d.id === stageDisplayId);
+                        if (win.isFullScreen()) win.setFullScreen(false);
+                        if (display) {
+                            win.setBounds({
+                                x: display.bounds.x,
+                                y: display.bounds.y,
+                                width: display.bounds.width,
+                                height: display.bounds.height
+                            });
+                        }
+                    } catch { /* park anyway */ }
                 }
                 parkOutputWindow(win);
             });
@@ -476,6 +489,23 @@ export async function openOutputWindow(
             if (outputWindow !== win || win.isDestroyed()) return;
             win.setIgnoreMouseEvents(false);
             if (stageDisplayId == null) win.moveTop();
+            else {
+                // Re-cover stage display when user focuses Output again (after park).
+                try {
+                    // eslint-disable-next-line @typescript-eslint/no-require-imports
+                    const { screen } = require("electron") as typeof import("electron");
+                    const display = screen.getAllDisplays().find(d => d.id === stageDisplayId);
+                    if (display) {
+                        win.setBounds({
+                            x: display.bounds.x,
+                            y: display.bounds.y,
+                            width: display.bounds.width,
+                            height: display.bounds.height
+                        });
+                        win.setFullScreen(true);
+                    }
+                } catch { /* ignore */ }
+            }
         });
         pageReady = new Promise((resolve, reject) => {
             win.webContents.once("did-finish-load", () => resolve());

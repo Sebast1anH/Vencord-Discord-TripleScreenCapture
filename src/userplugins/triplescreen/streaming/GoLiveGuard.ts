@@ -227,7 +227,8 @@ function reinforceScreenAudio(engine: any) {
 }
 
 function scheduleSystemAudioKeepalive() {
-    for (const ms of [300, 1200, 3500]) {
+    // Discord often swaps to the Output window shortly after go-live — re-assert screen early.
+    for (const ms of [100, 250, 500, 1000, 2000, 4000, 8000]) {
         scheduleAudio(() => {
             if (!ownsStream || !activeOutputId || !wantSystemAudio()) return;
             reinforceScreenAudio(MediaEngineStore?.getMediaEngine?.());
@@ -267,21 +268,27 @@ export function beginNativeShare(
         : windowVideoSource(videoSourceId);
 
     withBypass(() => {
-        try {
-            engine.setGoLiveSource(payload, "stream");
-        } catch (err) {
-            logger.warn("Flat go-live source failed, trying desktopDescription", err);
-            for (const conn of [...(engine.connections ?? [])]) {
-                if (conn.context !== "stream" && !conn.streamUserId) continue;
-                if (typeof conn.setGoLiveSource !== "function") continue;
-                try {
-                    conn.setGoLiveSource({
-                        quality: chosen,
-                        desktopDescription: desktopDescriptionFor(videoSourceId, useScreenAudio)
-                    });
-                } catch (inner) {
-                    logger.warn("Connection go-live failed", inner);
-                }
+        // Prefer connection desktopDescription (Discord's internal Entire-Screen shape), then flat id.
+        let applied = false;
+        for (const conn of [...(engine.connections ?? [])]) {
+            if (conn.context !== "stream" && !conn.streamUserId) continue;
+            if (typeof conn.setGoLiveSource !== "function") continue;
+            try {
+                conn.setGoLiveSource({
+                    quality: chosen,
+                    desktopDescription: desktopDescriptionFor(videoSourceId, useScreenAudio)
+                });
+                applied = true;
+            } catch (inner) {
+                logger.warn("Connection go-live failed", inner);
+            }
+        }
+        if (!applied) {
+            try {
+                engine.setGoLiveSource(payload, "stream");
+                applied = true;
+            } catch (err) {
+                logger.warn("Flat go-live source failed", err);
             }
         }
         try {
@@ -357,18 +364,16 @@ export function installGoLiveGuard() {
                 return originalSetGoLiveSource!.apply(this, args);
             }
 
-            if (activeOutputId && ownsStream && isScreenSource(source) && !isScreenSourceId(activeOutputId)) {
-                logger.info("Kept TripleScreen window as go-live video instead of", sourceIdOf(source));
-                return withBypass(() =>
-                    originalSetGoLiveSource!.call(
-                        this,
-                        retargetToActive(source, activeOutputId!),
-                        context ?? "stream"
-                    )
-                );
-            }
-
-            if (activeOutputId && ownsStream && isScreenSource(source) && isScreenSourceId(activeOutputId)) {
+            // Stage screen + system audio: Discord often re-picks our Output window after go-live.
+            // That window is Discord.exe → friends hear themselves. Always force back to our screen.
+            if (activeOutputId && ownsStream && isScreenSourceId(activeOutputId)) {
+                const nextId = sourceIdOf(source);
+                if (nextId !== activeOutputId) {
+                    logger.info(
+                        "Keeping stage screen go-live (system audio); blocked switch to",
+                        nextId || source
+                    );
+                }
                 const result = withBypass(() =>
                     originalSetGoLiveSource!.call(
                         this,
@@ -378,6 +383,17 @@ export function installGoLiveGuard() {
                 );
                 reinforceScreenAudio(MediaEngineStore?.getMediaEngine?.());
                 return result;
+            }
+
+            if (activeOutputId && ownsStream && isScreenSource(source) && !isScreenSourceId(activeOutputId)) {
+                logger.info("Kept TripleScreen window as go-live video instead of", sourceIdOf(source));
+                return withBypass(() =>
+                    originalSetGoLiveSource!.call(
+                        this,
+                        retargetToActive(source, activeOutputId!),
+                        context ?? "stream"
+                    )
+                );
             }
 
             if (ownsStream && source != null) {
@@ -391,9 +407,6 @@ export function installGoLiveGuard() {
                     const result = withBypass(() =>
                         originalSetGoLiveSource!.call(this, cleaned, context ?? "stream")
                     );
-                    if (wantSystemAudio() && isScreenSourceId(activeOutputId)) {
-                        reinforceScreenAudio(MediaEngineStore?.getMediaEngine?.());
-                    }
                     return result;
                 }
             }
