@@ -4,15 +4,21 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
-## 2026-11-02 — Revert audio mirror; restore stage screen system mix
+## 2026-11-02 — Output window + soundshareId 1 (system mix); works minimized
 
 ### Fixed
-- **Local echo of system audio:** Removed Output `loopbackWithoutChrome` mirror playback (you heard apps twice).
-- **Friends still heard only Discord / themselves:** Window + Discord PID soundshare cannot carry YouTube/games. Restored **stage screen go-live** (`screen:` + `soundshareId: 1`) — Discord’s Entire-Screen mix, which excludes call audio.
-- All selected monitors stay in the mosaic; the stage display tile is frozen so it does not recurse.
+- **Discord-only stream audio:** Live CDP showed go-live stuck on `window:…` with a process PID. Discord accepts `soundshareId: 1` (system mix sentinel) on that same Output window; we now pin it via `setGoLiveSource` + `setSoundshareSource(1,true)` and re-pin every 2s (Discord rewrites PIDs).
+- **Minimize broke A/V:** Always stream the Output window (park keeps it painted). No stage-screen switch, so video + system audio stay on while minimized.
 
 ### Changed
-- With system audio on, Output covers one display (framed, not exclusive fullscreen) so Discord can screen-capture it. Minimize parks to window capture (audio pauses until you focus Output again).
+- Removed stage-screen / audio-mirror paths for system audio.
+
+---
+
+## 2026-11-02 — Revert audio mirror; restore stage screen system mix — SUPERSEDED
+
+### Known issues
+- Stage path did not stick live (stream stayed on window PID). Superseded by window + soundshareId 1 above.
 
 ---
 
