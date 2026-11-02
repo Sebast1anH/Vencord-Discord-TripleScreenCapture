@@ -4,6 +4,15 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Vertical monitor flicker (in/out)
+
+### Fixed
+- **Portrait tile flashing in/out:** Per-frame orientation “fix” flipped when DXGI reported landscape vs portrait sizes intermittently. Orientation is now locked after the first stable sample.
+- Hold last good frame while a capture track mutes/ends; reconnect is throttled so the tile does not blank.
+- Tall/portrait captures request 30 fps (DXGI on rotated outputs is flaky at 60).
+
+---
+
 ## 2026-11-02 — Portrait / vertical monitor capture glitches
 
 ### Fixed

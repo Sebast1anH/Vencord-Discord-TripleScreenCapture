@@ -203,6 +203,11 @@ ctx.imageSmoothingEnabled = true;
 ctx.imageSmoothingQuality = "high";
 const videos = new Map();
 const frozen = new Map();
+/** Last successfully painted frame per source — avoids blank flashes when DXGI drops a frame. */
+const lastFrame = new Map();
+/** Locked capture→draw rotation per source (must not flip every frame). */
+const orientLock = new Map();
+const reconnectAt = new Map();
 let cfg = null;
 let bgImage = null;
 let bgImageUrl = "";
@@ -254,16 +259,53 @@ function loadBgImage(url) {
 
 const pending = new Map();
 
-/** Capture buffers from rotated panels are often landscape while OS size is portrait (or vice versa). */
-function captureOrientFix(srcW, srcH, expectW, expectH, displayRotation) {
-  if (!srcW || !srcH) return 0;
-  const srcLandscape = srcW >= srcH;
-  const expectLandscape = expectW > 0 && expectH > 0 ? expectW >= expectH : srcLandscape;
-  if (srcLandscape === expectLandscape) return 0;
-  const rot = ((Number(displayRotation) % 360) + 360) % 360;
-  if (rot === 90 || rot === 270) return rot;
-  // Aspects disagree but OS rotation unknown — rotate 90 so content matches expected orientation.
-  return 90;
+/**
+ * Decide capture→draw rotation once. DXGI often returns an unrotated (landscape) buffer for
+ * portrait OS modes; Chromium sometimes then flips reported size frame-to-frame. Recomputing
+ * every paint made vertical tiles flip in/out — lock after the first stable sample.
+ */
+function lockedOrient(id, srcW, srcH, expectW, expectH, displayRotation) {
+  const prev = orientLock.get(id);
+  if (prev && prev.w === srcW && prev.h === srcH) return prev.deg;
+  if (prev && Date.now() - prev.at < 1500) return prev.deg;
+  let deg = 0;
+  if (srcW && srcH && expectW > 0 && expectH > 0) {
+    const srcLandscape = srcW >= srcH;
+    const expectLandscape = expectW >= expectH;
+    if (srcLandscape !== expectLandscape) {
+      const rot = ((Number(displayRotation) % 360) + 360) % 360;
+      deg = (rot === 90 || rot === 270) ? rot : 90;
+    }
+  }
+  orientLock.set(id, { deg, w: srcW, h: srcH, at: Date.now() });
+  return deg;
+}
+
+function snapshotLastFrame(id, video) {
+  if (!video || video.readyState < 2 || !video.videoWidth) return;
+  try {
+    let c = lastFrame.get(id);
+    if (!c || c.width !== video.videoWidth || c.height !== video.videoHeight) {
+      c = document.createElement("canvas");
+      c.width = video.videoWidth;
+      c.height = video.videoHeight;
+      lastFrame.set(id, c);
+    }
+    c.getContext("2d").drawImage(video, 0, 0);
+  } catch (_) {}
+}
+
+function scheduleReconnect(id) {
+  if (!cfg || !(cfg.items || []).some(item => item.sourceId === id)) return;
+  const now = Date.now();
+  const nextAt = reconnectAt.get(id) || 0;
+  if (now < nextAt) return;
+  reconnectAt.set(id, now + 1500);
+  setTimeout(() => {
+    if (!cfg || !(cfg.items || []).some(item => item.sourceId === id)) return;
+    if (videos.has(id) || pending.has(id)) return;
+    ensureVideo(id).catch(() => {});
+  }, 200);
 }
 
 async function ensureVideo(id) {
@@ -274,13 +316,17 @@ async function ensureVideo(id) {
     if (!media || typeof media.getUserMedia !== "function") {
       throw new Error("mediaDevices unavailable in output page (bad origin)");
     }
-    // Portrait 1440p/4K exceeds 2160 — the old maxHeight clipped vertical monitors and glitched.
+    const item = (cfg && (cfg.items || []).find(i => i.sourceId === id)) || null;
+    // Portrait panels exceed 2160 on the long edge; also prefer 30fps on tall displays —
+    // DXGI on rotated outputs is flaky at 60 and drops frames (looks like glitching).
+    const tall = item && item.expectH > item.expectW;
+    const maxFps = tall ? 30 : 60;
     const stream = await media.getUserMedia({
       audio: false,
       video: { mandatory: {
         chromeMediaSource: "desktop",
         chromeMediaSourceId: id,
-        maxFrameRate: 60,
+        maxFrameRate: maxFps,
         maxWidth: 8192,
         maxHeight: 8192
       } }
@@ -293,20 +339,53 @@ async function ensureVideo(id) {
     document.body.appendChild(video);
     await video.play();
     const track = stream.getVideoTracks()[0];
-    if (track) track.onended = () => {
-      try { video.remove(); } catch (_) {}
-      videos.delete(id);
-      // Re-acquire so a transient desktop-capturer blip does not leave a black tile.
-      if (cfg && (cfg.items || []).some(item => item.sourceId === id)) {
-        ensureVideo(id).catch(() => {});
-      }
-    };
+    if (track) {
+      try { track.contentHint = "motion"; } catch (_) {}
+      track.onended = () => {
+        snapshotLastFrame(id, video);
+        try { video.remove(); } catch (_) {}
+        if (videos.get(id) === video) videos.delete(id);
+        // Keep lastFrame so draw does not blank while we reconnect.
+        scheduleReconnect(id);
+      };
+      track.onmute = () => { snapshotLastFrame(id, video); };
+    }
     videos.set(id, video);
     return video;
   })();
   pending.set(id, job);
   try { return await job; }
   finally { pending.delete(id); }
+}
+
+function paintTile(item, src, srcWidth, srcHeight, orient) {
+  const crop = item.crop || { top: 0, right: 0, bottom: 0, left: 0 };
+  const srcW = Math.max(1, srcWidth - (crop.left || 0) - (crop.right || 0));
+  const srcH = Math.max(1, srcHeight - (crop.top || 0) - (crop.bottom || 0));
+  const layoutW = (orient === 90 || orient === 270) ? srcH : srcW;
+  const layoutH = (orient === 90 || orient === 270) ? srcW : srcH;
+  ctx.save();
+  if (item.rotation) {
+    const cx = item.x + item.width / 2, cy = item.y + item.height / 2;
+    ctx.translate(cx, cy);
+    ctx.rotate(item.rotation * Math.PI / 180);
+    ctx.translate(-cx, -cy);
+  }
+  ctx.beginPath();
+  ctx.rect(item.x, item.y, item.width, item.height);
+  ctx.clip();
+  const dest = destRect(item, layoutW, layoutH);
+  if (orient) {
+    const cx = dest.x + dest.w / 2, cy = dest.y + dest.h / 2;
+    ctx.translate(cx, cy);
+    ctx.rotate(orient * Math.PI / 180);
+    const dw = (orient === 90 || orient === 270) ? dest.h : dest.w;
+    const dh = (orient === 90 || orient === 270) ? dest.w : dest.h;
+    ctx.drawImage(src, crop.left || 0, crop.top || 0, srcW, srcH, -dw / 2, -dh / 2, dw, dh);
+  } else {
+    ctx.drawImage(src, crop.left || 0, crop.top || 0, srcW, srcH, dest.x, dest.y, dest.w, dest.h);
+  }
+  ctx.restore();
 }
 
 function draw() {
@@ -333,39 +412,29 @@ function draw() {
   for (const item of items) {
     const video = videos.get(item.sourceId);
     const freeze = frozen.get(item.sourceId);
-    const src = (video && video.readyState >= 2 && video.videoWidth) ? video : freeze;
-    if (!src) continue;
+    const hold = lastFrame.get(item.sourceId);
+    const liveOk = video && video.readyState >= 2 && video.videoWidth > 0
+      && !(video.srcObject && video.srcObject.getVideoTracks && video.srcObject.getVideoTracks()[0] && video.srcObject.getVideoTracks()[0].muted);
+    if (liveOk) snapshotLastFrame(item.sourceId, video);
+    const src = liveOk ? video : (hold || freeze);
+    if (!src) {
+      if (!videos.has(item.sourceId) && !pending.has(item.sourceId) && !frozen.has(item.sourceId)) {
+        scheduleReconnect(item.sourceId);
+      }
+      continue;
+    }
     const srcWidth = src.videoWidth || src.width || 0;
     const srcHeight = src.videoHeight || src.height || 0;
     if (!srcWidth || !srcHeight) continue;
-    const crop = item.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-    const srcW = Math.max(1, srcWidth - (crop.left || 0) - (crop.right || 0));
-    const srcH = Math.max(1, srcHeight - (crop.top || 0) - (crop.bottom || 0));
-    const orient = captureOrientFix(srcW, srcH, item.expectW || 0, item.expectH || 0, item.displayRotation || 0);
-    const layoutW = (orient === 90 || orient === 270) ? srcH : srcW;
-    const layoutH = (orient === 90 || orient === 270) ? srcW : srcH;
-    ctx.save();
-    if (item.rotation) {
-      const cx = item.x + item.width / 2, cy = item.y + item.height / 2;
-      ctx.translate(cx, cy);
-      ctx.rotate(item.rotation * Math.PI / 180);
-      ctx.translate(-cx, -cy);
-    }
-    ctx.beginPath();
-    ctx.rect(item.x, item.y, item.width, item.height);
-    ctx.clip();
-    const dest = destRect(item, layoutW, layoutH);
-    if (orient) {
-      const cx = dest.x + dest.w / 2, cy = dest.y + dest.h / 2;
-      ctx.translate(cx, cy);
-      ctx.rotate(orient * Math.PI / 180);
-      const dw = (orient === 90 || orient === 270) ? dest.h : dest.w;
-      const dh = (orient === 90 || orient === 270) ? dest.w : dest.h;
-      ctx.drawImage(src, crop.left || 0, crop.top || 0, srcW, srcH, -dw / 2, -dh / 2, dw, dh);
-    } else {
-      ctx.drawImage(src, crop.left || 0, crop.top || 0, srcW, srcH, dest.x, dest.y, dest.w, dest.h);
-    }
-    ctx.restore();
+    const orient = lockedOrient(
+      item.sourceId,
+      srcWidth,
+      srcHeight,
+      item.expectW || 0,
+      item.expectH || 0,
+      item.displayRotation || 0
+    );
+    paintTile(item, src, srcWidth, srcHeight, orient);
   }
 }
 // setInterval keeps painting when covered; rAF stalls when occluded. Honor cfg.fps.
@@ -396,10 +465,19 @@ window.__tsApply = function (next) {
       if (stream) stream.getTracks().forEach(track => track.stop());
       video.remove();
       videos.delete(id);
+      lastFrame.delete(id);
+      orientLock.delete(id);
+      reconnectAt.delete(id);
     }
     for (const id of [...frozen.keys()]) {
       if (ids.includes(id)) continue;
       frozen.delete(id);
+    }
+    for (const id of [...lastFrame.keys()]) {
+      if (ids.includes(id)) continue;
+      lastFrame.delete(id);
+      orientLock.delete(id);
+      reconnectAt.delete(id);
     }
     return { ok: errors.length === 0, videos: videos.size + frozen.size, errors: errors };
   });
