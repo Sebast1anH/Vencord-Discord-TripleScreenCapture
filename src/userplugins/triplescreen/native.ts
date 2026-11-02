@@ -796,6 +796,11 @@ export async function closeOutputWindow(_event: IpcMainInvokeEvent) {
     stageDisplayId = null;
     stageScreenIdSaved = null;
     outputParked = false;
+    pendingPark = false;
+    if (pendingParkTimer) {
+        clearTimeout(pendingParkTimer);
+        pendingParkTimer = null;
+    }
     return true;
 }
 
