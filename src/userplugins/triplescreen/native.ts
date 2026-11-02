@@ -52,6 +52,8 @@ export interface NativeScreen {
     height: number;
     refreshRate?: number;
     isPrimary: boolean;
+    /** Electron Display.rotation: 0 / 90 / 180 / 270. */
+    rotation?: number;
     bounds: { x: number; y: number; width: number; height: number; };
 }
 
@@ -81,14 +83,20 @@ export async function listScreens(_event: IpcMainInvokeEvent): Promise<NativeScr
         } catch {
             url = undefined;
         }
+        // size/bounds are already orientation-aware (portrait if rotated).
+        // Prefer bounds×scaleFactor for physical pixels; fall back to size×scaleFactor.
+        const dipW = display.bounds?.width || display.size.width;
+        const dipH = display.bounds?.height || display.size.height;
+        const scale = Number(display.scaleFactor) || 1;
         return {
             id: source?.id ?? `screen:${index}:0`,
             name: source?.name || `Monitor ${index + 1}`,
             url,
-            width: Math.round(display.size.width * display.scaleFactor),
-            height: Math.round(display.size.height * display.scaleFactor),
+            width: Math.max(1, Math.round(dipW * scale)),
+            height: Math.max(1, Math.round(dipH * scale)),
             refreshRate: display.displayFrequency || undefined,
             isPrimary: display.id === primaryId,
+            rotation: Number(display.rotation) || 0,
             bounds: {
                 x: display.bounds.x,
                 y: display.bounds.y,
@@ -246,6 +254,18 @@ function loadBgImage(url) {
 
 const pending = new Map();
 
+/** Capture buffers from rotated panels are often landscape while OS size is portrait (or vice versa). */
+function captureOrientFix(srcW, srcH, expectW, expectH, displayRotation) {
+  if (!srcW || !srcH) return 0;
+  const srcLandscape = srcW >= srcH;
+  const expectLandscape = expectW > 0 && expectH > 0 ? expectW >= expectH : srcLandscape;
+  if (srcLandscape === expectLandscape) return 0;
+  const rot = ((Number(displayRotation) % 360) + 360) % 360;
+  if (rot === 90 || rot === 270) return rot;
+  // Aspects disagree but OS rotation unknown — rotate 90 so content matches expected orientation.
+  return 90;
+}
+
 async function ensureVideo(id) {
   if (videos.has(id)) return videos.get(id);
   if (pending.has(id)) return pending.get(id);
@@ -254,9 +274,16 @@ async function ensureVideo(id) {
     if (!media || typeof media.getUserMedia !== "function") {
       throw new Error("mediaDevices unavailable in output page (bad origin)");
     }
+    // Portrait 1440p/4K exceeds 2160 — the old maxHeight clipped vertical monitors and glitched.
     const stream = await media.getUserMedia({
       audio: false,
-      video: { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: id, maxFrameRate: 60, maxWidth: 3840, maxHeight: 2160 } }
+      video: { mandatory: {
+        chromeMediaSource: "desktop",
+        chromeMediaSourceId: id,
+        maxFrameRate: 60,
+        maxWidth: 8192,
+        maxHeight: 8192
+      } }
     });
     const video = document.createElement("video");
     video.muted = true;
@@ -314,6 +341,9 @@ function draw() {
     const crop = item.crop || { top: 0, right: 0, bottom: 0, left: 0 };
     const srcW = Math.max(1, srcWidth - (crop.left || 0) - (crop.right || 0));
     const srcH = Math.max(1, srcHeight - (crop.top || 0) - (crop.bottom || 0));
+    const orient = captureOrientFix(srcW, srcH, item.expectW || 0, item.expectH || 0, item.displayRotation || 0);
+    const layoutW = (orient === 90 || orient === 270) ? srcH : srcW;
+    const layoutH = (orient === 90 || orient === 270) ? srcW : srcH;
     ctx.save();
     if (item.rotation) {
       const cx = item.x + item.width / 2, cy = item.y + item.height / 2;
@@ -324,8 +354,17 @@ function draw() {
     ctx.beginPath();
     ctx.rect(item.x, item.y, item.width, item.height);
     ctx.clip();
-    const dest = destRect(item, srcW, srcH);
-    ctx.drawImage(src, crop.left || 0, crop.top || 0, srcW, srcH, dest.x, dest.y, dest.w, dest.h);
+    const dest = destRect(item, layoutW, layoutH);
+    if (orient) {
+      const cx = dest.x + dest.w / 2, cy = dest.y + dest.h / 2;
+      ctx.translate(cx, cy);
+      ctx.rotate(orient * Math.PI / 180);
+      const dw = (orient === 90 || orient === 270) ? dest.h : dest.w;
+      const dh = (orient === 90 || orient === 270) ? dest.w : dest.h;
+      ctx.drawImage(src, crop.left || 0, crop.top || 0, srcW, srcH, -dw / 2, -dh / 2, dw, dh);
+    } else {
+      ctx.drawImage(src, crop.left || 0, crop.top || 0, srcW, srcH, dest.x, dest.y, dest.w, dest.h);
+    }
     ctx.restore();
   }
 }
@@ -582,6 +621,11 @@ function sanitizeOutputConfig(config: unknown) {
             z: clampInt(Number(row.z), -100, 100),
             scaleMode: ["fit", "fill", "stretch"].includes(String(row.scaleMode)) ? String(row.scaleMode) : "fit",
             rotation: clampInt(Number(row.rotation), -360, 360),
+            expectW: clampInt(Number(row.expectW), 0, 8192),
+            expectH: clampInt(Number(row.expectH), 0, 8192),
+            displayRotation: [0, 90, 180, 270].includes(Number(row.displayRotation))
+                ? Number(row.displayRotation)
+                : 0,
             crop: {
                 top: clampInt(Number((row.crop as any)?.top), 0, 4096),
                 right: clampInt(Number((row.crop as any)?.right), 0, 4096),

@@ -315,17 +315,23 @@ export class DiscordStreamAdapter {
             backgroundOffsetY: output.backgroundImageOffsetY ?? 0,
             items: layout.monitors
                 .filter(item => item.visible && item.selected)
-                .map(item => ({
-                    sourceId: item.monitorId,
-                    x: item.x,
-                    y: item.y,
-                    width: item.width,
-                    height: item.height,
-                    z: item.zIndex,
-                    scaleMode: item.scaleMode,
-                    rotation: item.rotationDeg,
-                    crop: item.crop
-                }))
+                .map(item => {
+                    const monitor = displayCaptureManager.getMonitors().find(m => m.id === item.monitorId);
+                    return {
+                        sourceId: item.monitorId,
+                        x: item.x,
+                        y: item.y,
+                        width: item.width,
+                        height: item.height,
+                        z: item.zIndex,
+                        scaleMode: item.scaleMode,
+                        rotation: item.rotationDeg,
+                        expectW: monitor?.width ?? 0,
+                        expectH: monitor?.height ?? 0,
+                        displayRotation: monitor?.rotation ?? 0,
+                        crop: item.crop
+                    };
+                })
         };
     }
 

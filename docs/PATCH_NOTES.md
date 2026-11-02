@@ -4,6 +4,14 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Portrait / vertical monitor capture glitches
+
+### Fixed
+- **Vertical monitor glitching:** Output capture used `maxHeight: 2160`, which clips portrait 1440p/4K (e.g. 1440×2560) and corrupts that tile. Caps raised to 8192×8192.
+- When desktop capture returns a landscape buffer for an OS-rotated portrait display, the compositor now auto-rotates that tile so content matches the monitor orientation.
+
+---
+
 ## 2026-11-02 — Output window + soundshareId 1 (system mix); works minimized
 
 ### Fixed

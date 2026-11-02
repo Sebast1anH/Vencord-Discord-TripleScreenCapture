@@ -28,6 +28,8 @@ export interface MonitorInfo {
     refreshRate?: number;
     /** Whether this display is the OS primary. */
     isPrimary?: boolean;
+    /** OS clockwise rotation in degrees (0 / 90 / 180 / 270). */
+    rotation?: number;
     /** Approximate OS desktop bounds when available. */
     bounds?: { x: number; y: number; width: number; height: number; };
     thumbnailDataUrl?: string;

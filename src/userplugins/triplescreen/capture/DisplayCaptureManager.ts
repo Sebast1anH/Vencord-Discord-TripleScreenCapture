@@ -155,6 +155,8 @@ export class DisplayCaptureManager {
         // Electron / Discord Desktop: chromeMediaSource constraints.
         if (media.getUserMedia) {
             try {
+                // Portrait panels often exceed 2160 on the long edge — don't clip to landscape caps.
+                const maxEdge = Math.max(8192, monitor.width || 0, monitor.height || 0);
                 const constraints: MediaStreamConstraints = {
                     audio: false,
                     video: {
@@ -162,8 +164,8 @@ export class DisplayCaptureManager {
                         mandatory: {
                             chromeMediaSource: "desktop",
                             chromeMediaSourceId: monitor.id,
-                            maxWidth: monitor.width,
-                            maxHeight: monitor.height,
+                            maxWidth: maxEdge,
+                            maxHeight: maxEdge,
                             maxFrameRate: 60
                         }
                     }
@@ -206,6 +208,7 @@ export class DisplayCaptureManager {
                 height: screen.height,
                 refreshRate: screen.refreshRate,
                 isPrimary: screen.isPrimary,
+                rotation: screen.rotation,
                 bounds: screen.bounds,
                 thumbnailDataUrl: screen.url
             }));
