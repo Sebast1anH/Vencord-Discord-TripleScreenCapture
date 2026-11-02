@@ -212,9 +212,13 @@ export class DiscordStreamAdapter {
         const native = nativeHelpers();
         if (!native) return false;
 
-        // Always share the Output *window* so every selected monitor stays in the mosaic.
-        // System audio: screen bootstrap + setSoundshareSource(null, false) — no sacrificed stage.
+        // All selected monitors stay in the mosaic. System audio needs Discord screen go-live
+        // (window: + Discord PID = friends hear themselves). Stage = fullscreen Output on one
+        // display; that display's tile is frozen before fullscreen so it does not recurse.
         this.liveMosaicLayout = layout;
+        const wantAudio = readOutputSettings().includeSystemAudio !== false && isWindowsPlatform();
+        const selectedIds = layout.monitors.filter(m => m.visible && m.selected).map(m => m.monitorId);
+        const stage = wantAudio ? await pickStageScreen(native, selectedIds) : null;
 
         const opened = await native.openOutputWindow(width, height, fps);
         if (gen !== this.generation) return "closed" as const;
@@ -266,12 +270,33 @@ export class DiscordStreamAdapter {
             resolution: discordResolution(height),
             frameRate: fps
         };
-        const wantAudio = readOutputSettings().includeSystemAudio !== false && isWindowsPlatform();
-        const bootstrapScreenId = wantAudio ? await resolveDiscordScreenId() : null;
-        return beginNativeShare(windowSourceId, quality, {
-            includeSystemAudio: wantAudio,
-            bootstrapScreenId
-        });
+
+        let goLiveId = windowSourceId;
+        let audioOn = false;
+
+        if (stage && native.freezeOutputSources && native.promoteOutputToStage) {
+            // Let a couple of frames settle, then freeze the stage tile and go fullscreen.
+            await sleep(200);
+            if (gen !== this.generation || !this.expectingWindow) return "closed" as const;
+            await native.freezeOutputSources([stage.screenId]);
+            const promoted = await native.promoteOutputToStage(stage.screenId);
+            if (gen !== this.generation || !this.expectingWindow) return "closed" as const;
+            if (promoted?.ok) {
+                const electronScreen = promoted.screenSourceId || stage.screenId;
+                // Prefer Discord-native screen-handle when we can map this display; else Electron screen: id (worked in prior stage builds).
+                goLiveId = (await resolveDiscordScreenId(electronScreen)) || electronScreen;
+                audioOn = true;
+                logger.info(
+                    `System audio via stage screen go-live on ${goLiveId} (mosaic keeps all ${selectedIds.length} monitors; stage tile frozen)`
+                );
+            } else {
+                logger.warn("Stage promote failed — streaming video only (window share cannot carry system audio)");
+            }
+        } else if (wantAudio) {
+            logger.warn("No stage display available for system audio — streaming video only");
+        }
+
+        return beginNativeShare(goLiveId, quality, { includeSystemAudio: audioOn });
     }
 
     private outputPayload(layout: LayoutDefinition) {
@@ -370,23 +395,73 @@ function isWindowsPlatform() {
         || navigator.userAgent.includes("Windows");
 }
 
-/** Discord-native screen id for system-audio bootstrap (not Electron's). */
-async function resolveDiscordScreenId(): Promise<string | null> {
+type NativeScreenRow = {
+    id: string;
+    name: string;
+    isPrimary: boolean;
+    bounds: { x: number; y: number; width: number; height: number; };
+};
+
+/**
+ * Prefer Discord-native screen-handle ids for MediaEngine. Falls back to Electron screen: id.
+ * When preferElectronId is set, try to match that display among Discord sources by name/order.
+ */
+async function resolveDiscordScreenId(preferElectronId?: string | null): Promise<string | null> {
     try {
         const api = window.DiscordNative?.desktopCapture;
-        if (!api?.getDesktopCaptureSources) return null;
+        if (!api?.getDesktopCaptureSources) return preferElectronId ?? null;
         const sources = await api.getDesktopCaptureSources({
             types: ["screen"],
             thumbnailSize: { width: 0, height: 0 }
         });
-        if (!sources.length) return null;
-        // Prefer a real screen: / screen-handle: id Discord's MediaEngine accepts.
-        const handle = sources.find(s => s.id.toLowerCase().startsWith("screen-handle:"));
-        if (handle) return handle.id;
-        return sources[0]?.id ?? null;
+        if (!sources.length) return preferElectronId ?? null;
+
+        const handles = sources.filter(s => s.id.toLowerCase().startsWith("screen-handle:"));
+        const screens = sources.filter(s => s.id.toLowerCase().startsWith("screen:"));
+
+        if (preferElectronId) {
+            const exact = sources.find(s => s.id === preferElectronId);
+            if (exact) return exact.id;
+            // screen:<displayId>:0 → try matching index among Discord screens
+            const mid = preferElectronId.split(":")[1];
+            if (mid && /^\d+$/.test(mid)) {
+                const byElectronShape = screens.find(s => s.id.split(":")[1] === mid);
+                if (byElectronShape) return byElectronShape.id;
+            }
+        }
+
+        // Do not guess among multiple handles — wrong display would drop the mosaic from the stream.
+        if (handles.length === 1 && !preferElectronId) return handles[0].id;
+        return preferElectronId ?? handles[0]?.id ?? screens[0]?.id ?? sources[0]?.id ?? null;
+    } catch {
+        return preferElectronId ?? null;
+    }
+}
+
+/** Prefer an unused display; otherwise host on primary (still kept in the mosaic). */
+async function pickStageScreen(
+    native: NonNullable<ReturnType<typeof nativeHelpers>>,
+    selectedIds: string[]
+): Promise<{ screenId: string; } | null> {
+    if (!native.listScreens) return null;
+    let screens: NativeScreenRow[] = [];
+    try {
+        screens = await native.listScreens();
     } catch {
         return null;
     }
+    if (!screens.length) return null;
+
+    const unused = screens.filter(s => !selectedIds.includes(s.id));
+    if (unused.length) {
+        const spare = unused.find(s => !s.isPrimary) ?? unused[0];
+        return { screenId: spare.id };
+    }
+    if (screens.length < 1) return null;
+    const host = screens.find(s => s.isPrimary && selectedIds.includes(s.id))
+        ?? screens.find(s => selectedIds.includes(s.id))
+        ?? screens[0];
+    return host ? { screenId: host.id } : null;
 }
 
 function nativeHelpers() {
@@ -407,15 +482,16 @@ function nativeHelpers() {
                         stageDisplayId?: number | null;
                     }>;
                     configureOutput: (config: unknown) => Promise<{ ok: boolean; videos: number; errors: string[]; }>;
+                    freezeOutputSources?: (sourceIds: string[]) => Promise<{ ok: boolean; frozen: string[]; }>;
+                    promoteOutputToStage?: (stageScreenId: string) => Promise<{
+                        ok: boolean;
+                        screenSourceId: string | null;
+                        stageDisplayId: number | null;
+                    }>;
                     isOutputWindowOpen: () => Promise<boolean>;
                     getOutputSourceId: () => Promise<string | null>;
                     closeOutputWindow: () => Promise<boolean>;
-                    listScreens?: () => Promise<Array<{
-                        id: string;
-                        name: string;
-                        isPrimary: boolean;
-                        bounds: { x: number; y: number; width: number; height: number; };
-                    }>>;
+                    listScreens?: () => Promise<NativeScreenRow[]>;
                 };
             };
         };

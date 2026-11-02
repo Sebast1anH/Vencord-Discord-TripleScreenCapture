@@ -1,39 +1,52 @@
-# TripleScreen audit — 2026-11-02 (audio + full pass)
+# TripleScreen audit — 2026-11-02 (system audio, evidence-based)
 
-## Architecture
+## What actually broke system audio
 
-1. Layout editor selects N monitors → **Start**.
-2. Native **TripleScreen Output** window composites every selected monitor (`file://` page + `getUserMedia`).
-3. `GoLiveGuard.beginNativeShare` points Discord at that **window** (full mosaic).
-4. **System audio (Windows):**
-   1. Brief go-live on a Discord-native `screen:` / `screen-handle:` with `soundshareId: 1` (wakes desktop loopback).
-   2. Switch video to the Output window with `soundshareId: 1`.
-   3. `setSoundshareSource(null, false)` clears the single-PID filter (Nightcord “Entire System” — **not** `(0, true)`).
-5. Stop / close Output tears down.
+Friends heard **themselves** and nothing else (YouTube/games silent).
 
-## Findings this pass
+That is Discord.exe process loopback: TripleScreen Output is a `BrowserWindow` owned by Discord, so
+
+```text
+setGoLiveSource({ id: "window:…", soundshareId: <Discord PID> })
+```
+
+captures only Discord’s process tree (`ActivateApplicationLoopbackFromPid`).
+
+### Evidence (not speculation)
+
+| Source | Fact |
+|--------|------|
+| [jimman0I/soundshareSource.desktop](https://github.com/jimman0I/soundshareSource.desktop) | Entire Screen → `soundshareId: 1`; window → PID. `1` is the system-mix sentinel. |
+| Live CDP on this project (earlier session) | Stream already had `soundshareId: 1` on a **window:** source, and viewers still heard Discord-only echo. |
+| Nightcord `applyStreamAudio("system")` | Calls `setSoundshareSource(null, false)` to clear a PID filter on an **already screen-based** share — not a window→system bridge. |
+| User report after null/false + screen-bootstrap→window | Still Discord-only echo. |
+
+**Conclusion:** System audio requires go-live **video** id to be `screen:` / `screen-handle:` with `soundshareId: 1`. Switching back to a window source undoes it. Rewriting `soundshareId` on a window source does not enable endpoint loopback.
+
+## Correct architecture
+
+1. Select N monitors → mosaic includes **all** of them (no tile dropped for audio).
+2. Open floating Output → start capture of every selected monitor.
+3. If system audio: freeze the stage display’s tile (still frame), then fullscreen Output on that display.
+4. `setGoLiveSource({ id: stageScreen, soundshareId: 1 })` — Discord Entire-Screen audio path.
+5. Viewers see the fullscreen mosaic (all tiles). Stage tile may be a frozen pre-fullscreen snapshot so it does not recursively show the composite.
+
+Prefer an **unselected** display as stage when one exists; otherwise host on primary / first selected (still kept in the mosaic).
+
+## Findings
 
 | ID | Severity | Status | Finding |
 |----|----------|--------|---------|
-| C1 | Critical | **Fixed** | System audio only captured Discord. We called `setSoundshareSource(0, true)` first; it “succeeds” but does **not** enable full desktop loopback, so the Nightcord `(null, false)` clear never ran. |
-| C2 | Critical | **Fixed** | Window share of Discord-owned Output defaults to Discord.exe PID loopback. Now: screen bootstrap + `soundshareId: 1` on window payload + PID-filter clear. |
-| C3 | High | Fixed earlier | Auto stream-end teardown killed composites after a few seconds. |
-| C4 | Medium | **Fixed** | Background image had no resize/pan or stream-frame preview (added prior; verified in this pass). |
-| C5 | Medium | Accepted | Unused stage-fullscreen path still exists in `native.ts` (no longer called). Safe to delete in a cleanup PR. |
-| C6 | Low | Accepted | Picker tab is DOM/`MutationObserver` based. |
-| C7 | Low | Accepted | Minimize park uses PowerShell `SetWindowPos` (HWND digits only). |
-| C8 | Info | Open | Discord encoder still caps resolution/FPS (Nitro / server). |
-| C9 | Info | Open | If Discord changes `setSoundshareSource` semantics, re-verify with CDP (`soundshareId` / friends hearing apps). |
+| C1 | Critical | **Fixed** | Window go-live cannot carry system mix; restored screen-stage go-live. |
+| C2 | Critical | **Fixed** | Earlier “fix” kept switching to window after bootstrap — audio stayed Discord PID. |
+| C3 | High | Fixed | Do not exclude the stage monitor from the mosaic (that blocked “all 3”). Freeze tile instead. |
+| C4 | High | Fixed earlier | False STREAM_DELETE / store polls tearing down composite. |
+| C5 | Medium | Fixed earlier | Background scale/pan + stream-frame preview. |
+| C6 | Info | Open | Stage tile content is frozen while Output hosts that display (live apps on that monitor won’t update in that tile). |
+| C7 | Info | Open | Discord encoder / Nitro still cap resolution & FPS. |
 
 ## Verification
 
-- [x] Build (`pnpm build` in Vencord)
-- [ ] Manual: Select all monitors + system audio → Start in voice → viewers hear YouTube/games, not Discord echo
-- [ ] Manual: Stream stays up >30s without auto-stop
-- [ ] Manual: Background preview matches Output window letterbox/crop
-
-## Files touched
-
-- `streaming/GoLiveGuard.ts` — Nightcord audio clear + screen bootstrap
-- `streaming/DiscordStreamAdapter.ts` — DiscordNative screen id for bootstrap
-- `docs/AUDIT.md`, `docs/PATCH_NOTES.md`
+- [ ] All 3 monitors selected + system audio → mosaic shows 3 tiles
+- [ ] Viewers hear YouTube/game audio, not call echo
+- [ ] Stream stays up >30s (Stop / close Output ends it)

@@ -170,6 +170,7 @@ const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
 ctx.imageSmoothingEnabled = true;
 ctx.imageSmoothingQuality = "high";
 const videos = new Map();
+const frozen = new Map();
 let cfg = null;
 let bgImage = null;
 let bgImageUrl = "";
@@ -280,10 +281,15 @@ function draw() {
   const items = (cfg.items || []).slice().sort((a, b) => (a.z || 0) - (b.z || 0));
   for (const item of items) {
     const video = videos.get(item.sourceId);
-    if (!video || video.readyState < 2 || !video.videoWidth) continue;
+    const freeze = frozen.get(item.sourceId);
+    const src = (video && video.readyState >= 2 && video.videoWidth) ? video : freeze;
+    if (!src) continue;
+    const srcWidth = src.videoWidth || src.width || 0;
+    const srcHeight = src.videoHeight || src.height || 0;
+    if (!srcWidth || !srcHeight) continue;
     const crop = item.crop || { top: 0, right: 0, bottom: 0, left: 0 };
-    const srcW = Math.max(1, video.videoWidth - (crop.left || 0) - (crop.right || 0));
-    const srcH = Math.max(1, video.videoHeight - (crop.top || 0) - (crop.bottom || 0));
+    const srcW = Math.max(1, srcWidth - (crop.left || 0) - (crop.right || 0));
+    const srcH = Math.max(1, srcHeight - (crop.top || 0) - (crop.bottom || 0));
     ctx.save();
     if (item.rotation) {
       const cx = item.x + item.width / 2, cy = item.y + item.height / 2;
@@ -295,7 +301,7 @@ function draw() {
     ctx.rect(item.x, item.y, item.width, item.height);
     ctx.clip();
     const dest = destRect(item, srcW, srcH);
-    ctx.drawImage(video, crop.left || 0, crop.top || 0, srcW, srcH, dest.x, dest.y, dest.w, dest.h);
+    ctx.drawImage(src, crop.left || 0, crop.top || 0, srcW, srcH, dest.x, dest.y, dest.w, dest.h);
     ctx.restore();
   }
 }
@@ -317,6 +323,7 @@ window.__tsApply = function (next) {
     const ids = [...new Set((next.items || []).map(item => item.sourceId).filter(Boolean))];
     const errors = [];
     for (const id of ids) {
+      if (frozen.has(id)) continue;
       try { await ensureVideo(id); }
       catch (err) { errors.push(id + ": " + (err && err.message ? err.message : String(err))); }
     }
@@ -327,9 +334,35 @@ window.__tsApply = function (next) {
       video.remove();
       videos.delete(id);
     }
-    return { ok: errors.length === 0, videos: videos.size, errors: errors };
+    for (const id of [...frozen.keys()]) {
+      if (ids.includes(id)) continue;
+      frozen.delete(id);
+    }
+    return { ok: errors.length === 0, videos: videos.size + frozen.size, errors: errors };
   });
   return applyChain;
+};
+
+/** Snapshot live tiles then stop capture — used before fullscreen stage so the host monitor does not mirror the composite. */
+window.__tsFreeze = function (ids) {
+  const list = Array.isArray(ids) ? ids : [ids];
+  const done = [];
+  for (const id of list) {
+    if (!id || frozen.has(id)) { if (id) done.push(id); continue; }
+    const video = videos.get(id);
+    if (!video || video.readyState < 2 || !video.videoWidth) continue;
+    const c = document.createElement("canvas");
+    c.width = video.videoWidth;
+    c.height = video.videoHeight;
+    c.getContext("2d").drawImage(video, 0, 0);
+    const stream = video.srcObject;
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    try { video.remove(); } catch (_) {}
+    videos.delete(id);
+    frozen.set(id, c);
+    done.push(id);
+  }
+  return { ok: done.length > 0, frozen: done };
 };
 </script></body></html>`;
 
@@ -579,6 +612,63 @@ export async function configureOutput(_event: IpcMainInvokeEvent, config: unknow
     } catch (err) {
         return { ok: false, videos: 0, errors: [err instanceof Error ? err.message : String(err)] };
     }
+}
+
+/** Freeze live tiles to still frames (before stage fullscreen) so the host monitor is not recursive. */
+export async function freezeOutputSources(_event: IpcMainInvokeEvent, sourceIds: string[]) {
+    if (!outputWindow || outputWindow.isDestroyed()) return { ok: false, frozen: [] as string[] };
+    const ids = (Array.isArray(sourceIds) ? sourceIds : []).map(String).filter(Boolean).slice(0, 8);
+    if (!ids.length) return { ok: false, frozen: [] as string[] };
+    try {
+        if (pageReady) await pageReady;
+        const result = await outputWindow.webContents.executeJavaScript(
+            `window.__tsFreeze(${JSON.stringify(ids)})`,
+            true
+        );
+        return result ?? { ok: false, frozen: [] as string[] };
+    } catch {
+        return { ok: false, frozen: [] as string[] };
+    }
+}
+
+/**
+ * Move an already-open floating Output onto a display fullscreen for Discord screen go-live.
+ * Call after mosaic captures + freeze so all selected monitors stay in the stream.
+ */
+export async function promoteOutputToStage(_event: IpcMainInvokeEvent, stageScreenId: string) {
+    if (!outputWindow || outputWindow.isDestroyed()) {
+        return { ok: false, screenSourceId: null as string | null, stageDisplayId: null as number | null };
+    }
+    const stageDisplay = findDisplayForScreenId(stageScreenId);
+    if (!stageDisplay) {
+        return { ok: false, screenSourceId: null, stageDisplayId: null };
+    }
+    stageDisplayId = stageDisplay.id;
+    try {
+        if (outputWindow.isFullScreen()) outputWindow.setFullScreen(false);
+        outputWindow.setBounds({
+            x: stageDisplay.bounds.x,
+            y: stageDisplay.bounds.y,
+            width: stageDisplay.bounds.width,
+            height: stageDisplay.bounds.height
+        });
+        outputWindow.setFullScreen(true);
+        outputWindow.showInactive();
+    } catch (err) {
+        loggerWarn("promoteOutputToStage failed", err);
+        return { ok: false, screenSourceId: null, stageDisplayId: null };
+    }
+    const screenSourceId = findDisplayForScreenId(stageScreenId)?.id === stageDisplay.id
+        ? String(stageScreenId)
+        : await resolveScreenIdForDisplay(stageDisplay);
+    return { ok: true, screenSourceId, stageDisplayId };
+}
+
+function loggerWarn(message: string, err?: unknown) {
+    try {
+        // eslint-disable-next-line no-console
+        console.warn("[TripleScreen:native]", message, err);
+    } catch { /* ignore */ }
 }
 
 export async function getOutputSourceId(_event: IpcMainInvokeEvent) {

@@ -4,15 +4,22 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
-## 2026-11-02 — System audio: Nightcord clear + screen bootstrap
+## 2026-11-02 — System audio: screen-stage go-live (evidence fix)
 
 ### Fixed
-- **System audio only Discord:** `setSoundshareSource(0, true)` was treated as success and skipped the real entire-system call `setSoundshareSource(null, false)` (Nightcord). PID filter never cleared → Discord.exe loopback only
-- Go-live window payload now sets `soundshareId: 1` when system audio is on
-- Brief Discord-native **screen** go-live bootstrap activates desktop loopback, then video switches to the Output window (all monitors stay in the mosaic)
+- **Friends hear themselves / no YouTube:** Window go-live of TripleScreen Output always binds Windows process loopback to Discord.exe. CDP showed `soundshareId: 1` on a window source still Discord-only. `setSoundshareSource(null, false)` and screen→window bootstrap do not change that.
+- Restored **Entire-Screen go-live** (`screen:` / `screen-handle:` + `soundshareId: 1`) by fullscreen-hosting the Output on a stage display — the only path Discord uses for system mix (jimman / prior working stage build).
+- **All selected monitors stay in the mosaic** (no dropped stage tile). Stage tile is frozen to a still frame before fullscreen so it does not recursively capture the composite.
 
 ### Changed
-- `docs/AUDIT.md` rewritten for this audio investigation
+- `docs/AUDIT.md` rewritten with evidence and the rejected false fixes
+
+---
+
+## 2026-11-02 — System audio: Nightcord clear + screen bootstrap (insufficient)
+
+### Known
+- Did not fix audio: remaining on / returning to a window: source keeps Discord PID loopback. Superseded by screen-stage go-live above.
 
 ---
 

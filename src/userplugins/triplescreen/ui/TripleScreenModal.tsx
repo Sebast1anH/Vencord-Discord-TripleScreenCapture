@@ -35,7 +35,7 @@ function statusLabel(status: ReturnType<typeof discordStreamAdapter.getStatus>, 
         return "Preview only. Join a voice channel, then press Start composite stream.";
     }
     if (status.state === "streaming") {
-        return "Live. Viewers see the TripleScreen Output window (all selected monitors). System audio uses Discord’s desktop mix when enabled.";
+        return "Live. Viewers see the mosaic (all selected monitors). System audio uses Discord Entire-Screen capture on the stage display when enabled.";
     }
     return fallback;
 }
