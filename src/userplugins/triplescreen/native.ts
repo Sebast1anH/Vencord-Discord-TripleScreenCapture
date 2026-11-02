@@ -106,6 +106,12 @@ let pageReady: Promise<void> | null = null;
 let captureSessionReady = false;
 /** When set, output is fullscreen on this Electron display id (screen go-live for system audio). */
 let stageDisplayId: number | null = null;
+/** Remembered stage screen id so focus can re-promote after park. */
+let stageScreenIdSaved: string | null = null;
+/** True after minimize/park — Discord must use window: capture or the stream goes blank. */
+let outputParked = false;
+/** Floating size used when parking (not covering the whole stage monitor). */
+let floatingSize = { width: 960, height: 540 };
 
 function findDisplayForScreenId(screenId: string | undefined | null) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -404,8 +410,10 @@ export async function openOutputWindow(
     const canvasW = clampInt(width, 640, 2560);
     const canvasH = clampInt(height, 360, 1440);
     void frameRate;
+    outputParked = false;
 
     const stageDisplay = findDisplayForScreenId(options?.stageScreenId ?? null);
+    if (options?.stageScreenId) stageScreenIdSaved = String(options.stageScreenId);
     const nextStageId = stageDisplay?.id ?? null;
     // Frame / fullscreen chrome is fixed at BrowserWindow creation — recreate when mode flips.
     if (outputWindow && !outputWindow.isDestroyed()) {
@@ -429,6 +437,12 @@ export async function openOutputWindow(
     const h = stageDisplay
         ? Math.max(240, stageDisplay.bounds.height)
         : Math.max(240, Math.round(canvasH * scale));
+    // Always remember a floating size for minimize/park (even if we open staged).
+    const floatScale = Math.min(1, Math.max(320, area.width - 48) / canvasW, Math.max(240, area.height - 48) / canvasH);
+    floatingSize = {
+        width: Math.max(320, Math.round(canvasW * floatScale)),
+        height: Math.max(240, Math.round(canvasH * floatScale))
+    };
 
     if (!outputWindow || outputWindow.isDestroyed()) {
         const win = new BrowserWindow({
@@ -439,7 +453,7 @@ export async function openOutputWindow(
             frame: !stageDisplay,
             fullscreen: !!stageDisplay,
             resizable: false,
-            minimizable: !stageDisplay,
+            minimizable: true,
             maximizable: false,
             skipTaskbar: false,
             backgroundColor: "#000000",
@@ -459,53 +473,22 @@ export async function openOutputWindow(
             if (outputWindow === win) outputWindow = null;
             pageReady = null;
             stageDisplayId = null;
+            stageScreenIdSaved = null;
+            outputParked = false;
         });
         win.on("minimize", () => {
             setImmediate(() => {
                 if (!win || win.isDestroyed() || outputWindow !== win) return;
-                if (win.isMinimized()) win.restore();
-                // Stage: leave exclusive fullscreen so Z-order park works, but keep covering
-                // the stage display so Discord screen go-live still sees the mosaic.
-                if (stageDisplayId != null) {
-                    try {
-                        // eslint-disable-next-line @typescript-eslint/no-require-imports
-                        const { screen } = require("electron") as typeof import("electron");
-                        const display = screen.getAllDisplays().find(d => d.id === stageDisplayId);
-                        if (win.isFullScreen()) win.setFullScreen(false);
-                        if (display) {
-                            win.setBounds({
-                                x: display.bounds.x,
-                                y: display.bounds.y,
-                                width: display.bounds.width,
-                                height: display.bounds.height
-                            });
-                        }
-                    } catch { /* park anyway */ }
-                }
-                parkOutputWindow(win);
+                // Never leave the window OS-minimized (blank capture). Park painted instead.
+                // Renderer switches Discord from screen: → window: so the stream keeps the mosaic.
+                parkForMinimize(win);
             });
         });
         win.on("focus", () => {
             if (outputWindow !== win || win.isDestroyed()) return;
             win.setIgnoreMouseEvents(false);
-            if (stageDisplayId == null) win.moveTop();
-            else {
-                // Re-cover stage display when user focuses Output again (after park).
-                try {
-                    // eslint-disable-next-line @typescript-eslint/no-require-imports
-                    const { screen } = require("electron") as typeof import("electron");
-                    const display = screen.getAllDisplays().find(d => d.id === stageDisplayId);
-                    if (display) {
-                        win.setBounds({
-                            x: display.bounds.x,
-                            y: display.bounds.y,
-                            width: display.bounds.width,
-                            height: display.bounds.height
-                        });
-                        win.setFullScreen(true);
-                    }
-                } catch { /* ignore */ }
-            }
+            // Keep outputParked until promoteOutputToStage — renderer re-stages for system audio.
+            if (stageDisplayId == null || outputParked) win.moveTop();
         });
         pageReady = new Promise((resolve, reject) => {
             win.webContents.once("did-finish-load", () => resolve());
@@ -674,6 +657,8 @@ export async function promoteOutputToStage(_event: IpcMainInvokeEvent, stageScre
         return { ok: false, screenSourceId: null, stageDisplayId: null };
     }
     stageDisplayId = stageDisplay.id;
+    stageScreenIdSaved = String(stageScreenId);
+    outputParked = false;
     try {
         if (outputWindow.isFullScreen()) outputWindow.setFullScreen(false);
         outputWindow.setBounds({
@@ -683,6 +668,7 @@ export async function promoteOutputToStage(_event: IpcMainInvokeEvent, stageScre
             height: stageDisplay.bounds.height
         });
         outputWindow.setFullScreen(true);
+        outputWindow.setIgnoreMouseEvents(false);
         outputWindow.showInactive();
     } catch (err) {
         loggerWarn("promoteOutputToStage failed", err);
@@ -692,6 +678,25 @@ export async function promoteOutputToStage(_event: IpcMainInvokeEvent, stageScre
         ? String(stageScreenId)
         : await resolveScreenIdForDisplay(stageDisplay);
     return { ok: true, screenSourceId, stageDisplayId };
+}
+
+/**
+ * Share/park state for the renderer. When parked, Discord must go-live the Output
+ * window: source (still painted) — screen: capture of the stage monitor would be blank.
+ */
+export function getOutputShareState(_event: IpcMainInvokeEvent) {
+    const open = !!outputWindow && !outputWindow.isDestroyed();
+    let focused = false;
+    try {
+        focused = open && !!outputWindow?.isFocused();
+    } catch { focused = false; }
+    return {
+        open,
+        parked: open && outputParked,
+        focused,
+        stageScreenId: stageScreenIdSaved,
+        stageDisplayId
+    };
 }
 
 function loggerWarn(message: string, err?: unknown) {
@@ -724,6 +729,8 @@ export async function closeOutputWindow(_event: IpcMainInvokeEvent) {
         outputWindow = null;
         pageReady = null;
         stageDisplayId = null;
+        stageScreenIdSaved = null;
+        outputParked = false;
         return true;
     }
     try {
@@ -737,10 +744,36 @@ export async function closeOutputWindow(_event: IpcMainInvokeEvent) {
     if (outputWindow === win) outputWindow = null;
     pageReady = null;
     stageDisplayId = null;
+    stageScreenIdSaved = null;
+    outputParked = false;
     return true;
 }
 
-/** Minimized windows capture as a blank frame. Park it behind other windows instead, still fully painted. */
+/**
+ * Exit stage fullscreen, shrink to floating size, park behind other windows.
+ * Keeps the BrowserWindow painted so Discord window: capture still shows the mosaic.
+ */
+function parkForMinimize(win: import("electron").BrowserWindow) {
+    outputParked = true;
+    try {
+        if (win.isMinimized()) win.restore();
+        if (win.isFullScreen()) win.setFullScreen(false);
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { screen } = require("electron") as typeof import("electron");
+        const area = screen.getPrimaryDisplay().workArea;
+        const fw = Math.max(320, floatingSize.width);
+        const fh = Math.max(240, floatingSize.height);
+        win.setContentSize(fw, fh);
+        const [bw, bh] = win.getSize();
+        win.setPosition(
+            area.x + Math.max(0, Math.round((area.width - bw) / 2)),
+            area.y + Math.max(0, Math.round((area.height - bh) / 2))
+        );
+    } catch { /* park anyway */ }
+    parkOutputWindow(win);
+}
+
+/** Park behind other windows while staying painted (window: capture stays alive). */
 function parkOutputWindow(win: import("electron").BrowserWindow) {
     if (win.isMinimized()) win.restore();
     win.setIgnoreMouseEvents(true, { forward: true });

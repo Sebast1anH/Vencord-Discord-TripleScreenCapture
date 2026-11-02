@@ -4,6 +4,14 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Minimize parks Output; switch to window capture so stream stays
+
+### Fixed
+- **Minimize blocked / stream blank:** Screen go-live shows whatever is on the stage monitor — OS-minimize or covering the Output blanks the stream. Minimize now parks a floating, still-painted Output and Discord switches to `window:` capture so the mosaic keeps streaming.
+- Focusing the Output again re-promotes the stage screen go-live when system audio is enabled.
+
+---
+
 ## 2026-11-02 — Fix go-live payload shape (quality + desktopDescription)
 
 ### Fixed
