@@ -4,6 +4,26 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Full audit pass
+
+### Fixed
+- Output canvas ignored the configured FPS (always 60 Hz paint loop) — now follows `cfg.fps`
+- Stream-alive check treated any MediaEngine stream connection as live — now requires TripleScreen ownership and matching go-live source id when available
+- Stage ↔ window mode reuse kept wrong window chrome — recreate BrowserWindow when mode changes
+- Desktop-capture track end left black mosaic tiles — re-acquire the monitor stream
+- Duplicate `STREAM_DELETE` / `STREAM_CLOSE` subscriptions on guard reinstall
+- HWND park helper validates numeric ids before PowerShell
+- Status / settings copy updated for stage-monitor system audio (`stage-screen` mode)
+
+### Changed
+- `docs/AUDIT.md` rewritten for this full review
+
+### Known issues
+- Stage monitor omitted from mosaic without auto-reflow of remaining tiles
+- Single-display systems cannot use system-audio stage path
+
+---
+
 ## 2026-11-02 — Composite teardown after a few seconds
 
 ### Fixed

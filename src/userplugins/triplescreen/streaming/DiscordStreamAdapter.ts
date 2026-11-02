@@ -13,7 +13,7 @@ import { Compositor } from "../render/Compositor";
 import { readOutputSettings, resolveOutputSize } from "../settings";
 import type { LayoutDefinition } from "../types";
 import { performanceMonitor } from "../utils/PerformanceMonitor";
-import { beginNativeShare, endNativeShare } from "./GoLiveGuard";
+import { beginNativeShare, endNativeShare, getActiveGoLiveId, isNativeShareActive } from "./GoLiveGuard";
 
 const logger = new Logger("TripleScreen:StreamAdapter");
 const ApplicationStreamingStore = findStoreLazy("ApplicationStreamingStore");
@@ -25,7 +25,7 @@ export type StreamAdapterStatus =
     | { state: "streaming"; mode: InjectionMode; }
     | { state: "error"; message: string; };
 
-export type InjectionMode = "output-window" | "preview-only";
+export type InjectionMode = "output-window" | "stage-screen" | "preview-only";
 
 type StatusListener = (status: StreamAdapterStatus) => void;
 
@@ -37,7 +37,6 @@ export class DiscordStreamAdapter {
     private compositor: Compositor | null = null;
     private status: StreamAdapterStatus = { state: "idle" };
     private listeners = new Set<StatusListener>();
-    private reapplyTimer = 0;
     private layoutTimer = 0;
     private windowWatch: ReturnType<typeof setInterval> | null = null;
     private streamWatch: (() => void) | null = null;
@@ -131,7 +130,11 @@ export class DiscordStreamAdapter {
                 return;
             }
 
-            const mode: InjectionMode = published ? "output-window" : "preview-only";
+            const mode: InjectionMode = !published
+                ? "preview-only"
+                : this.stageScreenId
+                    ? "stage-screen"
+                    : "output-window";
             if (!published) {
                 performanceMonitor.setError("Discord did not start the stream. Stay in a voice channel, then press Start again.");
             } else {
@@ -198,10 +201,6 @@ export class DiscordStreamAdapter {
         this.stageScreenId = null;
         this.liveMosaicLayout = null;
         try {
-            if (this.reapplyTimer) {
-                clearTimeout(this.reapplyTimer);
-                this.reapplyTimer = 0;
-            }
             if (this.layoutTimer) {
                 clearTimeout(this.layoutTimer);
                 this.layoutTimer = 0;
@@ -380,12 +379,24 @@ export class DiscordStreamAdapter {
         try {
             if (ApplicationStreamingStore?.getCurrentUserActiveStream?.()) return true;
         } catch { /* store unavailable */ }
+
+        // Without our go-live ownership, do not keep the composite alive on unrelated connections.
+        if (!isNativeShareActive()) return false;
+        const ours = getActiveGoLiveId();
         try {
             const engine = MediaEngineStore?.getMediaEngine?.();
             for (const conn of [...(engine?.connections ?? [])]) {
                 if (conn.context !== "stream" && !conn.streamUserId) continue;
-                // Any live stream connection counts — store can lag behind MediaEngine.
-                return true;
+                const id = String(
+                    (conn as { goLiveSourceIdentifier?: unknown; goLiveSourceId?: unknown; }).goLiveSourceIdentifier
+                    ?? (conn as { goLiveSourceId?: unknown; }).goLiveSourceId
+                    ?? ""
+                );
+                if (!id) return true;
+                if (!ours) return true;
+                if (id === ours || id.endsWith(ours) || ours.endsWith(id)) return true;
+                // Discord pointed the encoder at something else — treat as ended for us.
+                return false;
             }
         } catch { /* engine unavailable */ }
         return false;

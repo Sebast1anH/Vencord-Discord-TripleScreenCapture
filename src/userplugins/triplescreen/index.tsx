@@ -93,12 +93,15 @@ export default definePlugin({
     settingsAboutComponent: () => (
         <div style={{ display: "grid", gap: 8 }}>
             <span>
-                TripleScreen composites selected displays into a single video track and attaches it to Discord's
-                existing Go Live / screen-share session. Viewers do not need the plugin.
+                TripleScreen composites selected displays into one Discord Go Live stream. Viewers do not need the plugin.
             </span>
             <span>
-                Open Discord's Screen Share picker and choose the TripleScreen tab, or use a voice-channel
-                right-click menu, the Vencord toolbox, or /triplescreen.
+                System audio (Windows) fullscreens the composite on a stage monitor and uses Discord&apos;s
+                Entire Screen soundshare path so friends hear your apps, not Discord call echo. Leave one
+                display unselected when possible.
+            </span>
+            <span>
+                Open Discord&apos;s Screen Share picker → TripleScreen tab, a voice-channel menu, the Vencord toolbox, or /triplescreen.
             </span>
             <Link href="https://docs.vencord.dev/installing/custom-plugins/">Vencord custom plugin install guide</Link>
         </div>

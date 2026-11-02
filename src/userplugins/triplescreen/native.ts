@@ -204,8 +204,12 @@ async function ensureVideo(id) {
     await video.play();
     const track = stream.getVideoTracks()[0];
     if (track) track.onended = () => {
-      video.remove();
+      try { video.remove(); } catch (_) {}
       videos.delete(id);
+      // Re-acquire so a transient desktop-capturer blip does not leave a black tile.
+      if (cfg && (cfg.items || []).some(item => item.sourceId === id)) {
+        ensureVideo(id).catch(() => {});
+      }
     };
     videos.set(id, video);
     return video;
@@ -244,13 +248,20 @@ function draw() {
     ctx.restore();
   }
 }
-// setInterval keeps painting when the window is covered; rAF can stall when occluded.
-setInterval(draw, 1000 / 60);
+// setInterval keeps painting when covered; rAF stalls when occluded. Honor cfg.fps.
+let drawTimer = null;
+function armDraw(fps) {
+  if (drawTimer) clearInterval(drawTimer);
+  const rate = Math.max(1, Math.min(60, Number(fps) || 30));
+  drawTimer = setInterval(draw, Math.max(8, Math.round(1000 / rate)));
+}
+armDraw(30);
 
 let applyChain = Promise.resolve();
 window.__tsApply = function (next) {
   applyChain = applyChain.then(async () => {
     cfg = next;
+    armDraw(next && next.fps);
     const ids = [...new Set((next.items || []).map(item => item.sourceId).filter(Boolean))];
     const errors = [];
     for (const id of ids) {
@@ -310,7 +321,18 @@ export async function openOutputWindow(
     void frameRate;
 
     const stageDisplay = findDisplayForScreenId(options?.stageScreenId ?? null);
-    stageDisplayId = stageDisplay?.id ?? null;
+    const nextStageId = stageDisplay?.id ?? null;
+    // Frame / fullscreen chrome is fixed at BrowserWindow creation — recreate when mode flips.
+    if (outputWindow && !outputWindow.isDestroyed()) {
+        const modeChanged = (stageDisplayId == null) !== (nextStageId == null)
+            || (nextStageId != null && stageDisplayId !== nextStageId);
+        if (modeChanged) {
+            try { outputWindow.destroy(); } catch { /* ignore */ }
+            outputWindow = null;
+            pageReady = null;
+        }
+    }
+    stageDisplayId = nextStageId;
 
     const area = (stageDisplay ?? screen.getPrimaryDisplay()).workArea;
     const maxW = Math.max(320, area.width - (stageDisplay ? 0 : 48));
@@ -542,6 +564,7 @@ function parkOutputWindow(win: import("electron").BrowserWindow) {
     others[0]?.focus();
     const handle = win.getNativeWindowHandle();
     const hwnd = handle.length >= 8 ? handle.readBigUInt64LE(0).toString() : String(handle.readUInt32LE(0));
+    if (!/^\d+$/.test(hwnd)) return;
     lowerBehind(hwnd);
     setTimeout(() => {
         if (outputWindow !== win || win.isDestroyed() || win.isFocused()) return;
@@ -550,6 +573,7 @@ function parkOutputWindow(win: import("electron").BrowserWindow) {
 }
 
 function lowerBehind(hwnd: string) {
+    if (!/^\d+$/.test(hwnd)) return;
     const script = [
         "Add-Type -Namespace TsScreen -Name Win -MemberDefinition '",
         "[System.Runtime.InteropServices.DllImport(\"user32.dll\")]",

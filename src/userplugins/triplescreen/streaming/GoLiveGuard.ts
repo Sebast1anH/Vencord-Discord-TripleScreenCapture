@@ -35,7 +35,16 @@ let activeOutputId: string | null = null;
 let ownsStream = false;
 /** Ignore STREAM_DELETE/CLOSE briefly after we apply go-live (Discord churns these). */
 let streamEventGuardUntil = 0;
+let streamEventsBound = false;
 const audioTimers = new Set<number>();
+
+export function isNativeShareActive() {
+    return ownsStream && !!activeOutputId;
+}
+
+export function getActiveGoLiveId() {
+    return ownsStream ? activeOutputId : null;
+}
 
 function withBypass<T>(fn: () => T): T {
     bypassDepth += 1;
@@ -248,10 +257,15 @@ export function beginNativeShare(
         : windowVideoSource(videoSourceId);
 
     withBypass(() => {
+        let applied = false;
+        // Flat { id, soundshareId } is the shape Discord's renderer uses for Go Live.
         try {
             engine.setGoLiveSource(payload, "stream");
+            applied = true;
         } catch (err) {
-            logger.warn("Flat go-live source failed, trying desktopDescription", err);
+            logger.warn("Flat go-live source failed, trying desktopDescription + quality", err);
+        }
+        if (!applied) {
             for (const conn of [...(engine.connections ?? [])]) {
                 if (conn.context !== "stream" && !conn.streamUserId) continue;
                 if (typeof conn.setGoLiveSource !== "function") continue;
@@ -260,11 +274,17 @@ export function beginNativeShare(
                         quality: chosen,
                         desktopDescription: desktopDescriptionFor(videoSourceId, useScreenAudio)
                     });
+                    applied = true;
                 } catch (inner) {
                     logger.warn("Connection go-live failed", inner);
                 }
             }
         }
+        // Best-effort quality hint without a second video-source swap.
+        try {
+            const maybe = engine as { setQuality?: (q: { resolution: number; frameRate: number; }, ctx?: string) => void; };
+            maybe.setQuality?.(chosen, "stream");
+        } catch { /* optional */ }
     });
 
     if (useScreenAudio) {
@@ -381,8 +401,11 @@ export function installGoLiveGuard() {
         logger.info("Go Live guard ready (screen-stage system audio)");
     });
 
-    FluxDispatcher.subscribe("STREAM_DELETE", onStreamGone as any);
-    FluxDispatcher.subscribe("STREAM_CLOSE", onStreamGone as any);
+    if (!streamEventsBound) {
+        FluxDispatcher.subscribe("STREAM_DELETE", onStreamGone as any);
+        FluxDispatcher.subscribe("STREAM_CLOSE", onStreamGone as any);
+        streamEventsBound = true;
+    }
 }
 
 function onStreamGone() {
@@ -407,8 +430,11 @@ export function uninstallGoLiveGuard() {
     patched = false;
     activeOutputId = null;
     ownsStream = false;
-    try {
-        FluxDispatcher.unsubscribe("STREAM_DELETE", onStreamGone as any);
-        FluxDispatcher.unsubscribe("STREAM_CLOSE", onStreamGone as any);
-    } catch { /* ignore */ }
+    if (streamEventsBound) {
+        try {
+            FluxDispatcher.unsubscribe("STREAM_DELETE", onStreamGone as any);
+            FluxDispatcher.unsubscribe("STREAM_CLOSE", onStreamGone as any);
+        } catch { /* ignore */ }
+        streamEventsBound = false;
+    }
 }
