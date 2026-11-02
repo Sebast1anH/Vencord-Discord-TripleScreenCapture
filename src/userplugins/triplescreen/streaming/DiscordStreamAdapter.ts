@@ -358,7 +358,8 @@ export class DiscordStreamAdapter {
     private watchOutputWindow() {
         this.stopWindowWatch();
         this.windowMisses = 0;
-        this.windowWatch = setInterval(() => void this.onOutputWindowClosed(), 500);
+        // Fast poll — minimize→park handshake must switch capture before the stage monitor blanks.
+        this.windowWatch = setInterval(() => void this.onOutputWindowClosed(), 100);
     }
 
     private stopWindowWatch() {
@@ -394,18 +395,42 @@ export class DiscordStreamAdapter {
     }
 
     /**
-     * Screen go-live blanks when Output is minimized/parked (monitor no longer shows the mosaic).
-     * Switch to window: capture while parked (window stays painted). Re-stage on focus for system audio.
+     * Minimize while screen-staged: switch Discord to window: FIRST, then confirm park.
+     * Parking before the switch blanks the stream (stage monitor no longer shows the mosaic).
      */
     private async syncShareModeForParkState(native: NonNullable<ReturnType<typeof nativeHelpers>>) {
         if (!native.getOutputShareState || this.shareSwitching || !this.shareQuality || !this.windowSourceId) return;
-        let state: { open: boolean; parked: boolean; focused: boolean; stageScreenId: string | null; };
+        let state: {
+            open: boolean;
+            parked: boolean;
+            pendingPark?: boolean;
+            focused: boolean;
+            stageScreenId: string | null;
+        };
         try {
             state = await native.getOutputShareState();
         } catch {
             return;
         }
         if (!state?.open) return;
+
+        if (state.pendingPark) {
+            this.shareSwitching = true;
+            try {
+                if (this.shareMode !== "window") {
+                    logger.info("Minimize requested — switching to window capture before park");
+                    this.shareMode = "window";
+                    beginNativeShare(this.windowSourceId, this.shareQuality, { includeSystemAudio: false });
+                    await sleep(200);
+                }
+                if (native.confirmOutputPark) {
+                    await native.confirmOutputPark();
+                }
+            } finally {
+                this.shareSwitching = false;
+            }
+            return;
+        }
 
         if (state.parked && this.shareMode === "screen") {
             this.shareSwitching = true;
@@ -570,10 +595,12 @@ function nativeHelpers() {
                     getOutputShareState?: () => Promise<{
                         open: boolean;
                         parked: boolean;
+                        pendingPark?: boolean;
                         focused: boolean;
                         stageScreenId: string | null;
                         stageDisplayId: number | null;
                     }>;
+                    confirmOutputPark?: () => Promise<{ ok: boolean; parked: boolean; }>;
                     isOutputWindowOpen: () => Promise<boolean>;
                     getOutputSourceId: () => Promise<string | null>;
                     closeOutputWindow: () => Promise<boolean>;

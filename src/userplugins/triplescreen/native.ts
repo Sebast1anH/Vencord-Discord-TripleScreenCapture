@@ -110,8 +110,26 @@ let stageDisplayId: number | null = null;
 let stageScreenIdSaved: string | null = null;
 /** True after minimize/park — Discord must use window: capture or the stream goes blank. */
 let outputParked = false;
+/**
+ * Minimize requested while staged: wait for renderer to switch Discord to window:
+ * capture, then confirmOutputPark() actually parks. Otherwise the stream blanks.
+ */
+let pendingPark = false;
+let pendingParkTimer: ReturnType<typeof setTimeout> | null = null;
 /** Floating size used when parking (not covering the whole stage monitor). */
 let floatingSize = { width: 960, height: 540 };
+
+function coverStageDisplay(win: import("electron").BrowserWindow, display: import("electron").Display) {
+    // Do NOT use exclusive fullscreen — it hides the title bar / breaks minimize.
+    // Cover the monitor with a normal framed window so screen capture still sees the mosaic.
+    if (win.isFullScreen()) win.setFullScreen(false);
+    win.setBounds({
+        x: display.bounds.x,
+        y: display.bounds.y,
+        width: display.bounds.width,
+        height: display.bounds.height
+    });
+}
 
 function findDisplayForScreenId(screenId: string | undefined | null) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -450,8 +468,8 @@ export async function openOutputWindow(
             height: h,
             title: OUTPUT_TITLE,
             show: false,
-            frame: !stageDisplay,
-            fullscreen: !!stageDisplay,
+            frame: true,
+            fullscreen: false,
             resizable: false,
             minimizable: true,
             maximizable: false,
@@ -475,19 +493,23 @@ export async function openOutputWindow(
             stageDisplayId = null;
             stageScreenIdSaved = null;
             outputParked = false;
+            pendingPark = false;
+            if (pendingParkTimer) {
+                clearTimeout(pendingParkTimer);
+                pendingParkTimer = null;
+            }
         });
         win.on("minimize", () => {
             setImmediate(() => {
                 if (!win || win.isDestroyed() || outputWindow !== win) return;
-                // Never leave the window OS-minimized (blank capture). Park painted instead.
-                // Renderer switches Discord from screen: → window: so the stream keeps the mosaic.
-                parkForMinimize(win);
+                // Undo OS minimize immediately (minimized = blank capture for window: too).
+                if (win.isMinimized()) win.restore();
+                requestPark(win);
             });
         });
         win.on("focus", () => {
             if (outputWindow !== win || win.isDestroyed()) return;
             win.setIgnoreMouseEvents(false);
-            // Keep outputParked until promoteOutputToStage — renderer re-stages for system audio.
             if (stageDisplayId == null || outputParked) win.moveTop();
         });
         pageReady = new Promise((resolve, reject) => {
@@ -505,14 +527,7 @@ export async function openOutputWindow(
 
     let screenSourceId: string | null = null;
     if (stageDisplay) {
-        outputWindow.setFullScreen(false);
-        outputWindow.setBounds({
-            x: stageDisplay.bounds.x,
-            y: stageDisplay.bounds.y,
-            width: stageDisplay.bounds.width,
-            height: stageDisplay.bounds.height
-        });
-        outputWindow.setFullScreen(true);
+        coverStageDisplay(outputWindow, stageDisplay);
         screenSourceId = options?.stageScreenId && findDisplayForScreenId(options.stageScreenId)?.id === stageDisplay.id
             ? String(options.stageScreenId)
             : await resolveScreenIdForDisplay(stageDisplay);
@@ -659,17 +674,16 @@ export async function promoteOutputToStage(_event: IpcMainInvokeEvent, stageScre
     stageDisplayId = stageDisplay.id;
     stageScreenIdSaved = String(stageScreenId);
     outputParked = false;
+    pendingPark = false;
+    if (pendingParkTimer) {
+        clearTimeout(pendingParkTimer);
+        pendingParkTimer = null;
+    }
     try {
-        if (outputWindow.isFullScreen()) outputWindow.setFullScreen(false);
-        outputWindow.setBounds({
-            x: stageDisplay.bounds.x,
-            y: stageDisplay.bounds.y,
-            width: stageDisplay.bounds.width,
-            height: stageDisplay.bounds.height
-        });
-        outputWindow.setFullScreen(true);
+        coverStageDisplay(outputWindow, stageDisplay);
         outputWindow.setIgnoreMouseEvents(false);
         outputWindow.showInactive();
+        outputWindow.moveTop();
     } catch (err) {
         loggerWarn("promoteOutputToStage failed", err);
         return { ok: false, screenSourceId: null, stageDisplayId: null };
@@ -681,8 +695,8 @@ export async function promoteOutputToStage(_event: IpcMainInvokeEvent, stageScre
 }
 
 /**
- * Share/park state for the renderer. When parked, Discord must go-live the Output
- * window: source (still painted) — screen: capture of the stage monitor would be blank.
+ * Share/park state for the renderer.
+ * pendingPark: minimize hit while staged — switch Discord to window: THEN call confirmOutputPark.
  */
 export function getOutputShareState(_event: IpcMainInvokeEvent) {
     const open = !!outputWindow && !outputWindow.isDestroyed();
@@ -693,10 +707,46 @@ export function getOutputShareState(_event: IpcMainInvokeEvent) {
     return {
         open,
         parked: open && outputParked,
+        pendingPark: open && pendingPark,
         focused,
         stageScreenId: stageScreenIdSaved,
         stageDisplayId
     };
+}
+
+/** Renderer calls this AFTER switching go-live to the Output window source. */
+export function confirmOutputPark(_event: IpcMainInvokeEvent) {
+    pendingPark = false;
+    if (pendingParkTimer) {
+        clearTimeout(pendingParkTimer);
+        pendingParkTimer = null;
+    }
+    if (!outputWindow || outputWindow.isDestroyed()) {
+        return { ok: false, parked: false };
+    }
+    parkForMinimize(outputWindow);
+    return { ok: true, parked: true };
+}
+
+function requestPark(win: import("electron").BrowserWindow) {
+    if (outputParked) {
+        parkForMinimize(win);
+        return;
+    }
+    // Staged (screen go-live): ask renderer to switch to window: first, or stream blanks.
+    if (stageDisplayId != null || stageScreenIdSaved) {
+        pendingPark = true;
+        if (pendingParkTimer) clearTimeout(pendingParkTimer);
+        // Fallback if renderer never confirms (plugin old / stuck).
+        pendingParkTimer = setTimeout(() => {
+            pendingParkTimer = null;
+            if (!pendingPark || !outputWindow || outputWindow.isDestroyed()) return;
+            pendingPark = false;
+            parkForMinimize(outputWindow);
+        }, 2000);
+        return;
+    }
+    parkForMinimize(win);
 }
 
 function loggerWarn(message: string, err?: unknown) {

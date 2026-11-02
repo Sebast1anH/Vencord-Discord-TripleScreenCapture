@@ -4,11 +4,11 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
-## 2026-11-02 — Minimize parks Output; switch to window capture so stream stays
+## 2026-11-02 — Minimize: no exclusive fullscreen; switch capture before park
 
 ### Fixed
-- **Minimize blocked / stream blank:** Screen go-live shows whatever is on the stage monitor — OS-minimize or covering the Output blanks the stream. Minimize now parks a floating, still-painted Output and Discord switches to `window:` capture so the mosaic keeps streaming.
-- Focusing the Output again re-promotes the stage screen go-live when system audio is enabled.
+- **Can't minimize / blank stream:** Exclusive fullscreen hid the title bar. Stage now covers the monitor with a normal framed window. Minimize sets `pendingPark`, Discord switches to `window:` capture first, then parks — so the mosaic stays in the stream.
+- Focus Output again to restore stage + system audio.
 
 ---
 
