@@ -72,6 +72,12 @@ export interface OutputSettings {
     /** Compressed data URL (image/jpeg|png|webp) or empty when using solid color only. */
     backgroundImageDataUrl: string;
     backgroundImageFit: BackgroundImageFit;
+    /** Extra scale on top of fit (0.25–4). */
+    backgroundImageScale: number;
+    /** Horizontal pan as % of canvas width (−100…100). */
+    backgroundImageOffsetX: number;
+    /** Vertical pan as % of canvas height (−100…100). */
+    backgroundImageOffsetY: number;
     snapToGrid: boolean;
     gridSize: number;
     includeSystemAudio: boolean;

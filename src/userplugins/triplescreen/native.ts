@@ -183,16 +183,24 @@ function destRect(item, srcW, srcH) {
   return { x: item.x + (item.width - w) / 2, y: item.y + (item.height - h) / 2, w: w, h: h };
 }
 
-function bgDest(fit, srcW, srcH, canvasW, canvasH) {
-  if (fit === "stretch") return { x: 0, y: 0, w: canvasW, h: canvasH };
-  if (fit === "center") {
-    return { x: (canvasW - srcW) / 2, y: (canvasH - srcH) / 2, w: srcW, h: srcH };
+function bgDest(fit, srcW, srcH, canvasW, canvasH, scaleMul, offsetXPct, offsetYPct) {
+  var x = 0, y = 0, w = canvasW, h = canvasH;
+  if (fit === "stretch") { w = canvasW; h = canvasH; }
+  else if (fit === "center") {
+    w = srcW; h = srcH;
+    x = (canvasW - w) / 2; y = (canvasH - h) / 2;
+  } else {
+    var base = fit === "fill"
+      ? Math.max(canvasW / srcW, canvasH / srcH)
+      : Math.min(canvasW / srcW, canvasH / srcH);
+    w = srcW * base; h = srcH * base;
+    x = (canvasW - w) / 2; y = (canvasH - h) / 2;
   }
-  const scale = fit === "fill"
-    ? Math.max(canvasW / srcW, canvasH / srcH)
-    : Math.min(canvasW / srcW, canvasH / srcH);
-  const w = srcW * scale, h = srcH * scale;
-  return { x: (canvasW - w) / 2, y: (canvasH - h) / 2, w: w, h: h };
+  var mul = Math.max(0.25, Math.min(4, Number(scaleMul) || 1));
+  var sw = w * mul, sh = h * mul;
+  var ox = (Number(offsetXPct) || 0) / 100 * canvasW;
+  var oy = (Number(offsetYPct) || 0) / 100 * canvasH;
+  return { x: x + (w - sw) / 2 + ox, y: y + (h - sh) / 2 + oy, w: sw, h: sh };
 }
 
 function loadBgImage(url) {
@@ -257,7 +265,16 @@ function draw() {
   ctx.fillStyle = cfg.background || "#000";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   if (bgImage && bgImage.naturalWidth) {
-    const dest = bgDest(cfg.backgroundFit || "fill", bgImage.naturalWidth, bgImage.naturalHeight, canvas.width, canvas.height);
+    const dest = bgDest(
+      cfg.backgroundFit || "fill",
+      bgImage.naturalWidth,
+      bgImage.naturalHeight,
+      canvas.width,
+      canvas.height,
+      cfg.backgroundScale,
+      cfg.backgroundOffsetX,
+      cfg.backgroundOffsetY
+    );
     ctx.drawImage(bgImage, dest.x, dest.y, dest.w, dest.h);
   }
   const items = (cfg.items || []).slice().sort((a, b) => (a.z || 0) - (b.z || 0));
@@ -515,6 +532,11 @@ function sanitizeOutputConfig(config: unknown) {
     const backgroundImage = sanitizeBackgroundImage(raw.backgroundImage);
     const fitRaw = String(raw.backgroundFit || "fill");
     const backgroundFit = ["fit", "fill", "stretch", "center"].includes(fitRaw) ? fitRaw : "fill";
+    const clampF = (n: number, min: number, max: number, fb: number) => {
+        const v = Number(n);
+        if (!Number.isFinite(v)) return fb;
+        return Math.min(max, Math.max(min, v));
+    };
     return {
         width: clampInt(Number(raw.width), 320, 2560),
         height: clampInt(Number(raw.height), 180, 1440),
@@ -524,6 +546,9 @@ function sanitizeOutputConfig(config: unknown) {
             : "#000000",
         backgroundImage,
         backgroundFit,
+        backgroundScale: clampF(Number(raw.backgroundScale), 0.25, 4, 1),
+        backgroundOffsetX: clampF(Number(raw.backgroundOffsetX), -100, 100, 0),
+        backgroundOffsetY: clampF(Number(raw.backgroundOffsetY), -100, 100, 0),
         items
     };
 }

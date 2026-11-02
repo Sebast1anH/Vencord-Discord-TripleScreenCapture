@@ -36,6 +36,7 @@ let ownsStream = false;
 /** Ignore STREAM_DELETE/CLOSE briefly after we apply go-live (Discord churns these). */
 let streamEventGuardUntil = 0;
 let streamEventsBound = false;
+let lastAudioPinAt = 0;
 const audioTimers = new Set<number>();
 
 export function isNativeShareActive() {
@@ -186,8 +187,11 @@ function trySetSoundshare(target: any, id: number | null, active: boolean, label
  * Prefer soundshare id 0 (clear PID filter); fall back to classic sentinel 1.
  * Never leave Discord.exe PID attached.
  */
-function pinSystemAudio(engine: any) {
+function pinSystemAudio(engine: any, force = false) {
     if (!wantSystemAudio() || !engine || !activeOutputId) return;
+    const now = performance.now();
+    if (!force && now - lastAudioPinAt < 2500) return;
+    lastAudioPinAt = now;
 
     const selfPid = discordPid();
     let pinned = false;
@@ -237,12 +241,11 @@ function pinSystemAudio(engine: any) {
 }
 
 function scheduleSystemAudioKeepalive() {
-    for (const ms of [300, 800, 2000]) {
-        scheduleAudio(() => {
-            if (!ownsStream || !activeOutputId || !wantSystemAudio()) return;
-            pinSystemAudio(MediaEngineStore?.getMediaEngine?.());
-        }, ms);
-    }
+    // One delayed re-pin only — repeated soundshare churn was killing the stream.
+    scheduleAudio(() => {
+        if (!ownsStream || !activeOutputId || !wantSystemAudio()) return;
+        pinSystemAudio(MediaEngineStore?.getMediaEngine?.());
+    }, 600);
 }
 
 /**
@@ -303,7 +306,7 @@ export function beginNativeShare(
     });
 
     if (wantAudio) {
-        pinSystemAudio(engine);
+        pinSystemAudio(engine, true);
         scheduleSystemAudioKeepalive();
     }
 
@@ -407,14 +410,10 @@ export function installGoLiveGuard() {
 }
 
 function onStreamGone() {
+    // Discord emits STREAM_DELETE/CLOSE while renegotiating soundshare / quality.
+    // Never drop ownership from these alone — endNativeShare / setGoLiveSource(null) own teardown.
     if (!ownsStream && !activeOutputId) return;
-    if (performance.now() < streamEventGuardUntil) {
-        logger.info("Ignoring stream-end event during go-live guard");
-        return;
-    }
-    ownsStream = false;
-    activeOutputId = null;
-    clearAudioTimers();
+    logger.info("Ignoring stream-end event while TripleScreen owns go-live");
 }
 
 export function uninstallGoLiveGuard() {

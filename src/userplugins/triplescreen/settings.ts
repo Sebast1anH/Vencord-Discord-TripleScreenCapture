@@ -18,6 +18,9 @@ export const DEFAULT_OUTPUT: OutputSettings = {
     backgroundColor: "#0b1020",
     backgroundImageDataUrl: "",
     backgroundImageFit: "fill",
+    backgroundImageScale: 1,
+    backgroundImageOffsetX: 0,
+    backgroundImageOffsetY: 0,
     snapToGrid: true,
     gridSize: 16,
     includeSystemAudio: true
@@ -103,6 +106,24 @@ export const settings = definePluginSettings({
             { label: "Center (no scale)", value: "center" as BackgroundImageFit }
         ]
     },
+    backgroundImageScale: {
+        type: OptionType.NUMBER,
+        description: "Background image scale multiplier",
+        default: 1,
+        hidden: true
+    },
+    backgroundImageOffsetX: {
+        type: OptionType.NUMBER,
+        description: "Background image horizontal offset (%)",
+        default: 0,
+        hidden: true
+    },
+    backgroundImageOffsetY: {
+        type: OptionType.NUMBER,
+        description: "Background image vertical offset (%)",
+        default: 0,
+        hidden: true
+    },
     snapToGrid: {
         type: OptionType.BOOLEAN,
         description: "Snap monitor rectangles to the layout grid",
@@ -181,10 +202,19 @@ export function readOutputSettings(): OutputSettings {
         backgroundColor: store.backgroundColor || DEFAULT_OUTPUT.backgroundColor,
         backgroundImageDataUrl: sanitizeBackgroundImageDataUrl(store.backgroundImageDataUrl),
         backgroundImageFit: normalizeBackgroundImageFit(store.backgroundImageFit),
+        backgroundImageScale: clampNum(store.backgroundImageScale, 0.25, 4, 1),
+        backgroundImageOffsetX: clampNum(store.backgroundImageOffsetX, -100, 100, 0),
+        backgroundImageOffsetY: clampNum(store.backgroundImageOffsetY, -100, 100, 0),
         snapToGrid: store.snapToGrid,
         gridSize: store.gridSize || 16,
         includeSystemAudio: store.includeSystemAudio !== false
     };
+}
+
+function clampNum(value: unknown, min: number, max: number, fallback: number) {
+    const n = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, n));
 }
 
 /**

@@ -5,19 +5,15 @@
  */
 
 import { Logger } from "@utils/Logger";
-import { findStoreLazy } from "@webpack";
-
 import { displayCaptureManager } from "../capture/DisplayCaptureManager";
 import { layoutManager } from "../layouts/LayoutManager";
 import { Compositor } from "../render/Compositor";
 import { readOutputSettings, resolveOutputSize } from "../settings";
 import type { LayoutDefinition } from "../types";
 import { performanceMonitor } from "../utils/PerformanceMonitor";
-import { beginNativeShare, endNativeShare, getActiveGoLiveId, isNativeShareActive } from "./GoLiveGuard";
+import { beginNativeShare, endNativeShare } from "./GoLiveGuard";
 
 const logger = new Logger("TripleScreen:StreamAdapter");
-const ApplicationStreamingStore = findStoreLazy("ApplicationStreamingStore");
-const MediaEngineStore = findStoreLazy("MediaEngineStore");
 
 export type StreamAdapterStatus =
     | { state: "idle"; }
@@ -39,7 +35,6 @@ export class DiscordStreamAdapter {
     private listeners = new Set<StatusListener>();
     private layoutTimer = 0;
     private windowWatch: ReturnType<typeof setInterval> | null = null;
-    private streamWatch: (() => void) | null = null;
     private expectingWindow = false;
     private cleaning = false;
     private generation = 0;
@@ -49,9 +44,6 @@ export class DiscordStreamAdapter {
     private lastLayout: LayoutDefinition | null = null;
     /** Layout actually sent to the output window. */
     private liveMosaicLayout: LayoutDefinition | null = null;
-    /** Ignore Discord "no stream" polls until go-live has had time to register. */
-    private streamGuardUntil = 0;
-    private streamMisses = 0;
     private windowMisses = 0;
 
     subscribe(listener: StatusListener): () => void {
@@ -108,7 +100,10 @@ export class DiscordStreamAdapter {
                 frameRate: Math.min(30, fps),
                 backgroundColor: activeLayout.backgroundColor || outputSettings.backgroundColor,
                 backgroundImageDataUrl: outputSettings.backgroundImageDataUrl,
-                backgroundImageFit: outputSettings.backgroundImageFit
+                backgroundImageFit: outputSettings.backgroundImageFit,
+                backgroundImageScale: outputSettings.backgroundImageScale,
+                backgroundImageOffsetX: outputSettings.backgroundImageOffsetX,
+                backgroundImageOffsetY: outputSettings.backgroundImageOffsetY
             });
             this.compositor.setLayout(activeLayout);
             const native = nativeHelpers();
@@ -135,11 +130,6 @@ export class DiscordStreamAdapter {
             const mode: InjectionMode = published ? "output-window" : "preview-only";
             if (!published) {
                 performanceMonitor.setError("Discord did not start the stream. Stay in a voice channel, then press Start again.");
-            } else {
-                // Discord churns stream store / events for a while after setGoLiveSource.
-                this.streamGuardUntil = performance.now() + 15_000;
-                this.streamMisses = 0;
-                this.watchDiscordStreamEnd();
             }
             this.setStatus({ state: "streaming", mode });
             logger.info(`Streaming started via ${mode} at ${fps} fps`);
@@ -161,7 +151,10 @@ export class DiscordStreamAdapter {
         this.compositor?.setOptions({
             backgroundColor: layout.backgroundColor || outputSettings.backgroundColor,
             backgroundImageDataUrl: outputSettings.backgroundImageDataUrl,
-            backgroundImageFit: outputSettings.backgroundImageFit
+            backgroundImageFit: outputSettings.backgroundImageFit,
+            backgroundImageScale: outputSettings.backgroundImageScale,
+            backgroundImageOffsetX: outputSettings.backgroundImageOffsetX,
+            backgroundImageOffsetY: outputSettings.backgroundImageOffsetY
         });
         layoutManager.upsert(layout);
         if (!this.expectingWindow) return;
@@ -199,7 +192,6 @@ export class DiscordStreamAdapter {
                 this.layoutTimer = 0;
             }
             this.stopWindowWatch();
-            this.unwatchDiscordStreamEnd();
             this.compositor?.stop();
             this.compositor = null;
             displayCaptureManager.stopCapture();
@@ -289,6 +281,9 @@ export class DiscordStreamAdapter {
             background: layout.backgroundColor || output.backgroundColor || "#000000",
             backgroundImage: output.backgroundImageDataUrl || "",
             backgroundFit: output.backgroundImageFit || "fill",
+            backgroundScale: output.backgroundImageScale ?? 1,
+            backgroundOffsetX: output.backgroundImageOffsetX ?? 0,
+            backgroundOffsetY: output.backgroundImageOffsetY ?? 0,
             items: layout.monitors
                 .filter(item => item.visible && item.selected)
                 .map(item => ({
@@ -340,65 +335,6 @@ export class DiscordStreamAdapter {
         this.expectingWindow = false;
         logger.info("Output window closed — releasing the composite");
         await this.stop();
-    }
-
-    private streamStillLive() {
-        try {
-            if (ApplicationStreamingStore?.getCurrentUserActiveStream?.()) return true;
-        } catch { /* store unavailable */ }
-
-        // Without our go-live ownership, do not keep the composite alive on unrelated connections.
-        if (!isNativeShareActive()) return false;
-        const ours = getActiveGoLiveId();
-        try {
-            const engine = MediaEngineStore?.getMediaEngine?.();
-            for (const conn of [...(engine?.connections ?? [])]) {
-                if (conn.context !== "stream" && !conn.streamUserId) continue;
-                const id = String(
-                    (conn as { goLiveSourceIdentifier?: unknown; goLiveSourceId?: unknown; }).goLiveSourceIdentifier
-                    ?? (conn as { goLiveSourceId?: unknown; }).goLiveSourceId
-                    ?? ""
-                );
-                if (!id) return true;
-                if (!ours) return true;
-                if (id === ours || id.endsWith(ours) || ours.endsWith(id)) return true;
-                // Discord pointed the encoder at something else — treat as ended for us.
-                return false;
-            }
-        } catch { /* engine unavailable */ }
-        return false;
-    }
-
-    private watchDiscordStreamEnd() {
-        this.unwatchDiscordStreamEnd();
-        const check = () => {
-            if (!this.expectingWindow || this.cleaning) return;
-            if (performance.now() < this.streamGuardUntil) return;
-            try {
-                if (this.streamStillLive()) {
-                    this.streamMisses = 0;
-                    return;
-                }
-                // Require several consecutive empty polls — store/engine flicker after go-live.
-                this.streamMisses += 1;
-                if (this.streamMisses < 5) return;
-                if (this.status.state === "streaming") {
-                    logger.info("Discord stream ended — releasing TripleScreen");
-                    void this.stop();
-                }
-            } catch {
-                /* store may be unavailable briefly */
-            }
-        };
-        const timer = setInterval(check, 2000);
-        this.streamWatch = () => clearInterval(timer);
-        // Do not stop on STREAM_DELETE/CLOSE alone — Discord fires these while renegotiating.
-        // Polling MediaEngine + ApplicationStreamingStore is the durable signal.
-    }
-
-    private unwatchDiscordStreamEnd() {
-        this.streamWatch?.();
-        this.streamWatch = null;
     }
 
     private async waitForOutputSource(native: NonNullable<ReturnType<typeof nativeHelpers>>) {

@@ -5,6 +5,7 @@
  */
 
 import type { BackgroundImageFit, CaptureFrame, LayoutDefinition, MonitorLayoutItem, ScaleMode } from "../types";
+import { computeBackgroundDest } from "../utils/backgroundImage";
 import { performanceMonitor } from "../utils/PerformanceMonitor";
 
 export interface CompositorOptions {
@@ -14,6 +15,9 @@ export interface CompositorOptions {
     backgroundColor: string;
     backgroundImageDataUrl?: string;
     backgroundImageFit?: BackgroundImageFit;
+    backgroundImageScale?: number;
+    backgroundImageOffsetX?: number;
+    backgroundImageOffsetY?: number;
 }
 
 /**
@@ -141,12 +145,15 @@ export class Compositor {
         this.ctx.fillStyle = this.options.backgroundColor || "#000";
         this.ctx.fillRect(0, 0, width, height);
         if (this.bgImage?.naturalWidth) {
-            const dest = backgroundDest(
+            const dest = computeBackgroundDest(
                 this.options.backgroundImageFit || "fill",
                 this.bgImage.naturalWidth,
                 this.bgImage.naturalHeight,
                 width,
-                height
+                height,
+                this.options.backgroundImageScale ?? 1,
+                this.options.backgroundImageOffsetX ?? 0,
+                this.options.backgroundImageOffsetY ?? 0
             );
             this.ctx.drawImage(this.bgImage, dest.x, dest.y, dest.w, dest.h);
         }
@@ -227,21 +234,3 @@ function computeDestRect(
     };
 }
 
-function backgroundDest(
-    fit: BackgroundImageFit,
-    srcW: number,
-    srcH: number,
-    canvasW: number,
-    canvasH: number
-) {
-    if (fit === "stretch") return { x: 0, y: 0, w: canvasW, h: canvasH };
-    if (fit === "center") {
-        return { x: (canvasW - srcW) / 2, y: (canvasH - srcH) / 2, w: srcW, h: srcH };
-    }
-    const scale = fit === "fill"
-        ? Math.max(canvasW / srcW, canvasH / srcH)
-        : Math.min(canvasW / srcW, canvasH / srcH);
-    const w = srcW * scale;
-    const h = srcH * scale;
-    return { x: (canvasW - w) / 2, y: (canvasH - h) / 2, w, h };
-}

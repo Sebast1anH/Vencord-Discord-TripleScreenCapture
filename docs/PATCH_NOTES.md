@@ -4,6 +4,18 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Crash fix + background resize preview
+
+### Fixed
+- Composite dying after a few seconds: removed auto-teardown from flaky Discord stream-store polls / `STREAM_DELETE` ownership drops; Output window close and Stop remain the stop signals
+- Softened system-audio keepalive to a single re-pin (repeated `setSoundshareSource` churn)
+
+### Added
+- Background image **resize** (25–300%) and **pan X/Y** sliders
+- Live **on-stream preview** matching output resolution, with % of image visible in the frame
+
+---
+
 ## 2026-11-02 — All monitors + system audio (no stage)
 
 ### Changed

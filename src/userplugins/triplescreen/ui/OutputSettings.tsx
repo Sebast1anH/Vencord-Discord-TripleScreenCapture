@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { React, useRef, useState } from "@webpack/common";
+import { React, useEffect, useRef, useState } from "@webpack/common";
 
-import { encodeBackgroundImageFile } from "../settings";
+import { encodeBackgroundImageFile, resolveOutputSize } from "../settings";
 import type { BackgroundImageFit, FrameRatePreset, OutputSettings, ScaleMode } from "../types";
+import { computeBackgroundDest, visibleImageCoverage } from "../utils/backgroundImage";
 
 interface Props {
     value: OutputSettings;
@@ -26,13 +27,28 @@ export function OutputSettingsPanel({ value, onChange }: Props) {
         setImageError(null);
         try {
             const dataUrl = await encodeBackgroundImageFile(file);
-            patch({ backgroundImageDataUrl: dataUrl });
+            patch({
+                backgroundImageDataUrl: dataUrl,
+                backgroundImageScale: 1,
+                backgroundImageOffsetX: 0,
+                backgroundImageOffsetY: 0
+            });
         } catch (err) {
             setImageError(err instanceof Error ? err.message : String(err));
         } finally {
             setImageBusy(false);
             if (fileRef.current) fileRef.current.value = "";
         }
+    };
+
+    const clearImage = () => {
+        setImageError(null);
+        patch({
+            backgroundImageDataUrl: "",
+            backgroundImageScale: 1,
+            backgroundImageOffsetX: 0,
+            backgroundImageOffsetY: 0
+        });
     };
 
     return (
@@ -126,41 +142,15 @@ export function OutputSettingsPanel({ value, onChange }: Props) {
                         style={{ display: "none" }}
                         onChange={e => void onPickImage(e.target.files?.[0])}
                     />
-                    <button
-                        type="button"
-                        disabled={imageBusy}
-                        onClick={() => fileRef.current?.click()}
-                    >
+                    <button type="button" disabled={imageBusy} onClick={() => fileRef.current?.click()}>
                         {imageBusy ? "Loading…" : value.backgroundImageDataUrl ? "Replace image" : "Choose image"}
                     </button>
                     {value.backgroundImageDataUrl ? (
-                        <button
-                            type="button"
-                            className="danger"
-                            disabled={imageBusy}
-                            onClick={() => {
-                                setImageError(null);
-                                patch({ backgroundImageDataUrl: "" });
-                            }}
-                        >
+                        <button type="button" className="danger" disabled={imageBusy} onClick={clearImage}>
                             Clear
                         </button>
                     ) : null}
                 </div>
-                {value.backgroundImageDataUrl ? (
-                    <img
-                        src={value.backgroundImageDataUrl}
-                        alt="Background preview"
-                        style={{
-                            marginTop: 8,
-                            width: "100%",
-                            maxHeight: 96,
-                            objectFit: "cover",
-                            borderRadius: 6,
-                            border: "1px solid var(--background-modifier-accent, #3f4147)"
-                        }}
-                    />
-                ) : null}
                 {imageError ? (
                     <p style={{ fontSize: 11, color: "var(--text-danger, #f23f43)", margin: "6px 0 0" }}>
                         {imageError}
@@ -169,19 +159,77 @@ export function OutputSettingsPanel({ value, onChange }: Props) {
             </div>
 
             {value.backgroundImageDataUrl ? (
-                <div className="triplescreen-field">
-                    <label htmlFor="ts-bg-fit">Background image fit</label>
-                    <select
-                        id="ts-bg-fit"
-                        value={value.backgroundImageFit}
-                        onChange={e => patch({ backgroundImageFit: e.target.value as BackgroundImageFit })}
-                    >
-                        <option value="fill">Fill (crop)</option>
-                        <option value="fit">Fit (letterbox)</option>
-                        <option value="stretch">Stretch</option>
-                        <option value="center">Center (original size)</option>
-                    </select>
-                </div>
+                <>
+                    <div className="triplescreen-field">
+                        <label htmlFor="ts-bg-fit">Fit mode</label>
+                        <select
+                            id="ts-bg-fit"
+                            value={value.backgroundImageFit}
+                            onChange={e => patch({ backgroundImageFit: e.target.value as BackgroundImageFit })}
+                        >
+                            <option value="fill">Fill (crop to frame)</option>
+                            <option value="fit">Fit (letterbox)</option>
+                            <option value="stretch">Stretch</option>
+                            <option value="center">Center (1:1 pixels)</option>
+                        </select>
+                    </div>
+
+                    <div className="triplescreen-field">
+                        <label htmlFor="ts-bg-zoom">
+                            Resize {Math.round(value.backgroundImageScale * 100)}%
+                        </label>
+                        <input
+                            id="ts-bg-zoom"
+                            type="range"
+                            min={25}
+                            max={300}
+                            step={1}
+                            value={Math.round(value.backgroundImageScale * 100)}
+                            onChange={e => patch({ backgroundImageScale: Number(e.target.value) / 100 })}
+                        />
+                    </div>
+
+                    <div className="triplescreen-field">
+                        <label htmlFor="ts-bg-ox">Pan X {Math.round(value.backgroundImageOffsetX)}%</label>
+                        <input
+                            id="ts-bg-ox"
+                            type="range"
+                            min={-100}
+                            max={100}
+                            step={1}
+                            value={value.backgroundImageOffsetX}
+                            onChange={e => patch({ backgroundImageOffsetX: Number(e.target.value) })}
+                        />
+                    </div>
+
+                    <div className="triplescreen-field">
+                        <label htmlFor="ts-bg-oy">Pan Y {Math.round(value.backgroundImageOffsetY)}%</label>
+                        <input
+                            id="ts-bg-oy"
+                            type="range"
+                            min={-100}
+                            max={100}
+                            step={1}
+                            value={value.backgroundImageOffsetY}
+                            onChange={e => patch({ backgroundImageOffsetY: Number(e.target.value) })}
+                        />
+                    </div>
+
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                        <button
+                            type="button"
+                            onClick={() => patch({
+                                backgroundImageScale: 1,
+                                backgroundImageOffsetX: 0,
+                                backgroundImageOffsetY: 0
+                            })}
+                        >
+                            Reset transform
+                        </button>
+                    </div>
+
+                    <BackgroundStreamPreview value={value} />
+                </>
             ) : null}
 
             <div className="triplescreen-field">
@@ -207,9 +255,98 @@ export function OutputSettingsPanel({ value, onChange }: Props) {
             </div>
 
             <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
-                Custom background images fill empty canvas areas behind your monitors. System audio pins Discord&apos;s
-                full desktop mix (not Discord.exe loopback) so you can share every selected display. Discord still caps
-                video (often 720p without Nitro, 1080p with Nitro).
+                The preview frame matches your stream resolution — only what sits inside that box appears behind
+                your monitors. Discord still caps video (often 720p without Nitro, 1080p with Nitro).
+            </p>
+        </div>
+    );
+}
+
+function BackgroundStreamPreview({ value }: { value: OutputSettings; }) {
+    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    const [coverage, setCoverage] = useState(1);
+    const size = resolveOutputSize(value);
+
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas || !value.backgroundImageDataUrl) return;
+        let cancelled = false;
+        const img = new Image();
+        img.onload = () => {
+            if (cancelled) return;
+            const maxPreviewW = 280;
+            const scale = Math.min(1, maxPreviewW / size.width);
+            const pw = Math.max(1, Math.round(size.width * scale));
+            const ph = Math.max(1, Math.round(size.height * scale));
+            canvas.width = pw;
+            canvas.height = ph;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.fillStyle = normalizeColor(value.backgroundColor);
+            ctx.fillRect(0, 0, pw, ph);
+            const dest = computeBackgroundDest(
+                value.backgroundImageFit,
+                img.naturalWidth,
+                img.naturalHeight,
+                pw,
+                ph,
+                value.backgroundImageScale,
+                value.backgroundImageOffsetX,
+                value.backgroundImageOffsetY
+            );
+            ctx.drawImage(img, dest.x, dest.y, dest.w, dest.h);
+            // Stream frame border
+            ctx.strokeStyle = "rgba(255,255,255,0.85)";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(1, 1, pw - 2, ph - 2);
+            // Hatch area outside the image (letterbox) already shows bg color.
+            // Dim anything of the image that spills outside? Clip already by canvas.
+            const fullDest = computeBackgroundDest(
+                value.backgroundImageFit,
+                img.naturalWidth,
+                img.naturalHeight,
+                size.width,
+                size.height,
+                value.backgroundImageScale,
+                value.backgroundImageOffsetX,
+                value.backgroundImageOffsetY
+            );
+            setCoverage(visibleImageCoverage(fullDest, size.width, size.height));
+        };
+        img.src = value.backgroundImageDataUrl;
+        return () => { cancelled = true; };
+    }, [
+        value.backgroundImageDataUrl,
+        value.backgroundImageFit,
+        value.backgroundImageScale,
+        value.backgroundImageOffsetX,
+        value.backgroundImageOffsetY,
+        value.backgroundColor,
+        size.width,
+        size.height
+    ]);
+
+    const pct = Math.round(coverage * 100);
+
+    return (
+        <div className="triplescreen-field">
+            <label>On-stream preview ({size.width}×{size.height})</label>
+            <canvas
+                ref={canvasRef}
+                style={{
+                    width: "100%",
+                    maxWidth: 280,
+                    height: "auto",
+                    display: "block",
+                    borderRadius: 6,
+                    border: "1px solid var(--background-modifier-accent, #3f4147)",
+                    background: "#000"
+                }}
+            />
+            <p style={{ fontSize: 11, color: "var(--text-muted)", margin: "6px 0 0" }}>
+                {pct >= 99
+                    ? "Full image fits inside the stream frame."
+                    : `${pct}% of the scaled image is visible on stream (rest is cropped outside the frame).`}
             </p>
         </div>
     );

@@ -107,6 +107,9 @@ function TripleScreenModal({ modalProps }: { modalProps: ModalProps; }) {
         settings.store.backgroundColor = next.backgroundColor;
         settings.store.backgroundImageDataUrl = next.backgroundImageDataUrl || "";
         settings.store.backgroundImageFit = next.backgroundImageFit;
+        settings.store.backgroundImageScale = next.backgroundImageScale;
+        settings.store.backgroundImageOffsetX = next.backgroundImageOffsetX;
+        settings.store.backgroundImageOffsetY = next.backgroundImageOffsetY;
         settings.store.snapToGrid = next.snapToGrid;
         settings.store.gridSize = next.gridSize;
         settings.store.includeSystemAudio = next.includeSystemAudio;
