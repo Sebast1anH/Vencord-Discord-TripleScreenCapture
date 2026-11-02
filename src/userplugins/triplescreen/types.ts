@@ -30,6 +30,8 @@ export interface MonitorInfo {
     isPrimary?: boolean;
     /** OS clockwise rotation in degrees (0 / 90 / 180 / 270). */
     rotation?: number;
+    /** Fallback chromeMediaSourceIds if the primary id fails on this machine. */
+    altIds?: string[];
     /** Approximate OS desktop bounds when available. */
     bounds?: { x: number; y: number; width: number; height: number; };
     thumbnailDataUrl?: string;

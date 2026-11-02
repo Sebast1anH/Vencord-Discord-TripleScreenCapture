@@ -319,6 +319,8 @@ export class DiscordStreamAdapter {
                     const monitor = displayCaptureManager.getMonitors().find(m => m.id === item.monitorId);
                     return {
                         sourceId: item.monitorId,
+                        altSourceIds: monitor?.altIds ?? [],
+                        isPrimary: !!monitor?.isPrimary,
                         x: item.x,
                         y: item.y,
                         width: item.width,

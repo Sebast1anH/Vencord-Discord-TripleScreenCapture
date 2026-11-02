@@ -54,7 +54,139 @@ export interface NativeScreen {
     isPrimary: boolean;
     /** Electron Display.rotation: 0 / 90 / 180 / 270. */
     rotation?: number;
+    /** Alternate chromeMediaSourceIds to try if the primary id fails / flickers. */
+    altIds?: string[];
     bounds: { x: number; y: number; width: number; height: number; };
+}
+
+type CapturerSource = {
+    id: string;
+    name: string;
+    display_id?: string;
+    thumbnail: { isEmpty: () => boolean; toDataURL: () => string; getSize: () => { width: number; height: number; }; };
+};
+
+/**
+ * Map each Display to a unique desktopCapturer screen source.
+ *
+ * On Windows, Electron often has mismatched display_id vs screen.id (or empty display_id).
+ * Blindly using sources[index] can assign the SAME source to two monitors — the secondary
+ * tile then fights DXGI and flickers in/out. Two monitors are fully supported; matching must
+ * be unique.
+ */
+function matchDisplaysToSources(
+    displays: Array<import("electron").Display>,
+    sources: CapturerSource[],
+    primaryId: number
+): NativeScreen[] {
+    const screenSources = sources.filter(s => /^screen:/i.test(s.id));
+    const pool = [...screenSources];
+    const take = (pred: (s: CapturerSource) => boolean): CapturerSource | undefined => {
+        const idx = pool.findIndex(pred);
+        if (idx < 0) return undefined;
+        return pool.splice(idx, 1)[0];
+    };
+
+    // Stable order: primary first, then left-to-right / top-to-bottom.
+    const ordered = displays
+        .map((display, index) => ({ display, index }))
+        .sort((a, b) => {
+            if (a.display.id === primaryId) return -1;
+            if (b.display.id === primaryId) return 1;
+            if (a.display.bounds.y !== b.display.bounds.y) return a.display.bounds.y - b.display.bounds.y;
+            if (a.display.bounds.x !== b.display.bounds.x) return a.display.bounds.x - b.display.bounds.x;
+            return a.index - b.index;
+        });
+
+    const assigned = new Map<number, CapturerSource>();
+
+    // Pass 1: exact display_id / embedded id match.
+    for (const { display } of ordered) {
+        const idStr = String(display.id);
+        const hit = take(s =>
+            String(s.display_id || "") === idStr
+            || s.id === `screen:${idStr}:0`
+            || s.id.split(":")[1] === idStr
+        );
+        if (hit) assigned.set(display.id, hit);
+    }
+
+    // Pass 2: aspect-ratio match via thumbnail (helps when display_id is wrong/empty).
+    for (const { display } of ordered) {
+        if (assigned.has(display.id)) continue;
+        const dipW = Math.max(1, display.bounds?.width || display.size.width);
+        const dipH = Math.max(1, display.bounds?.height || display.size.height);
+        const expectAspect = dipW / dipH;
+        let best: CapturerSource | undefined;
+        let bestScore = Infinity;
+        for (const s of pool) {
+            let tw = 0;
+            let th = 0;
+            try {
+                const sz = s.thumbnail.getSize();
+                tw = sz.width;
+                th = sz.height;
+            } catch { /* ignore */ }
+            if (!tw || !th) continue;
+            const score = Math.abs(tw / th - expectAspect);
+            if (score < bestScore) {
+                bestScore = score;
+                best = s;
+            }
+        }
+        if (best && bestScore < 0.08) {
+            const idx = pool.indexOf(best);
+            if (idx >= 0) pool.splice(idx, 1);
+            assigned.set(display.id, best);
+        }
+    }
+
+    // Pass 3: remaining sources in capturer order ↔ remaining displays (no reuse).
+    for (const { display } of ordered) {
+        if (assigned.has(display.id)) continue;
+        const hit = pool.shift();
+        if (hit) assigned.set(display.id, hit);
+    }
+
+    return ordered.map(({ display, index }, orderIdx) => {
+        const source = assigned.get(display.id);
+        const dipW = display.bounds?.width || display.size.width;
+        const dipH = display.bounds?.height || display.size.height;
+        const scale = Number(display.scaleFactor) || 1;
+        const primaryIdStr = source?.id ?? `screen:${orderIdx}:0`;
+        const altIds = [...new Set([
+            primaryIdStr,
+            `screen:${orderIdx}:0`,
+            `screen:${index}:0`,
+            `screen:${display.id}:0`,
+            source?.display_id ? `screen:${source.display_id}:0` : ""
+        ].filter(Boolean))].filter(id => id !== primaryIdStr);
+
+        let url: string | undefined;
+        try {
+            if (source && !source.thumbnail.isEmpty()) url = source.thumbnail.toDataURL();
+        } catch {
+            url = undefined;
+        }
+
+        return {
+            id: primaryIdStr,
+            name: source?.name || `Monitor ${orderIdx + 1}`,
+            url,
+            width: Math.max(1, Math.round(dipW * scale)),
+            height: Math.max(1, Math.round(dipH * scale)),
+            refreshRate: display.displayFrequency || undefined,
+            isPrimary: display.id === primaryId,
+            rotation: Number(display.rotation) || 0,
+            altIds,
+            bounds: {
+                x: display.bounds.x,
+                y: display.bounds.y,
+                width: display.bounds.width,
+                height: display.bounds.height
+            }
+        };
+    });
 }
 
 /**
@@ -70,41 +202,9 @@ export async function listScreens(_event: IpcMainInvokeEvent): Promise<NativeScr
         types: ["screen"],
         thumbnailSize: { width: 320, height: 180 },
         fetchWindowIcons: false
-    });
+    }) as CapturerSource[];
 
-    return displays.map((display, index) => {
-        const source = sources.find(item => (item as { display_id?: string; }).display_id === String(display.id))
-            ?? sources.find(item => item.id === `screen:${display.id}:0`)
-            ?? sources.find(item => item.id.split(":")[1] === String(display.id))
-            ?? sources[index];
-        let url: string | undefined;
-        try {
-            if (source && !source.thumbnail.isEmpty()) url = source.thumbnail.toDataURL();
-        } catch {
-            url = undefined;
-        }
-        // size/bounds are already orientation-aware (portrait if rotated).
-        // Prefer bounds×scaleFactor for physical pixels; fall back to size×scaleFactor.
-        const dipW = display.bounds?.width || display.size.width;
-        const dipH = display.bounds?.height || display.size.height;
-        const scale = Number(display.scaleFactor) || 1;
-        return {
-            id: source?.id ?? `screen:${index}:0`,
-            name: source?.name || `Monitor ${index + 1}`,
-            url,
-            width: Math.max(1, Math.round(dipW * scale)),
-            height: Math.max(1, Math.round(dipH * scale)),
-            refreshRate: display.displayFrequency || undefined,
-            isPrimary: display.id === primaryId,
-            rotation: Number(display.rotation) || 0,
-            bounds: {
-                x: display.bounds.x,
-                y: display.bounds.y,
-                width: display.bounds.width,
-                height: display.bounds.height
-            }
-        };
-    });
+    return matchDisplaysToSources(displays, sources, primaryId);
 }
 
 const OUTPUT_TITLE = "TripleScreen Output";
@@ -308,6 +408,20 @@ function scheduleReconnect(id) {
   }, 200);
 }
 
+async function openDesktopStream(sourceId, maxFps) {
+  const media = navigator.mediaDevices;
+  return media.getUserMedia({
+    audio: false,
+    video: { mandatory: {
+      chromeMediaSource: "desktop",
+      chromeMediaSourceId: sourceId,
+      maxFrameRate: maxFps,
+      maxWidth: 8192,
+      maxHeight: 8192
+    } }
+  });
+}
+
 async function ensureVideo(id) {
   if (videos.has(id)) return videos.get(id);
   if (pending.has(id)) return pending.get(id);
@@ -317,24 +431,43 @@ async function ensureVideo(id) {
       throw new Error("mediaDevices unavailable in output page (bad origin)");
     }
     const item = (cfg && (cfg.items || []).find(i => i.sourceId === id)) || null;
-    // Portrait panels exceed 2160 on the long edge; also prefer 30fps on tall displays —
-    // DXGI on rotated outputs is flaky at 60 and drops frames (looks like glitching).
+    // Prefer 30fps on secondary / tall displays — dual-monitor DXGI is flaky at 60 on many GPUs.
+    const secondary = item && item.isPrimary === false;
     const tall = item && item.expectH > item.expectW;
-    const maxFps = tall ? 30 : 60;
-    const stream = await media.getUserMedia({
-      audio: false,
-      video: { mandatory: {
-        chromeMediaSource: "desktop",
-        chromeMediaSourceId: id,
-        maxFrameRate: maxFps,
-        maxWidth: 8192,
-        maxHeight: 8192
-      } }
-    });
+    const maxFps = (secondary || tall) ? 30 : 60;
+    const candidates = [...new Set([
+      id,
+      ...((item && item.altSourceIds) || [])
+    ].filter(Boolean))];
+    // Avoid opening the same chromeMediaSourceId twice (two tiles → DXGI fight → flicker).
+    const inUse = new Set();
+    for (const [otherId, otherVideo] of videos) {
+      if (otherId === id) continue;
+      const stream = otherVideo && otherVideo.srcObject;
+      const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
+      const settings = track && track.getSettings ? track.getSettings() : null;
+      // settings.deviceId is not set for desktop; track label sometimes has id — keep map of chosen ids
+      if (otherVideo.__tsSourceId) inUse.add(otherVideo.__tsSourceId);
+    }
+    let stream = null;
+    let usedId = id;
+    let lastErr = null;
+    for (const candidate of candidates) {
+      if (inUse.has(candidate)) continue;
+      try {
+        stream = await openDesktopStream(candidate, maxFps);
+        usedId = candidate;
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!stream) throw lastErr || new Error("No desktop source worked for " + id);
     const video = document.createElement("video");
     video.muted = true;
     video.playsInline = true;
     video.srcObject = stream;
+    video.__tsSourceId = usedId;
     video.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none";
     document.body.appendChild(video);
     await video.play();
@@ -345,7 +478,6 @@ async function ensureVideo(id) {
         snapshotLastFrame(id, video);
         try { video.remove(); } catch (_) {}
         if (videos.get(id) === video) videos.delete(id);
-        // Keep lastFrame so draw does not blank while we reconnect.
         scheduleReconnect(id);
       };
       track.onmute = () => { snapshotLastFrame(id, video); };
@@ -690,8 +822,17 @@ function sanitizeOutputConfig(config: unknown) {
         const sourceId = String(row.sourceId ?? "");
         // Accept Electron / DiscordNative screen ids only (never arbitrary window ids).
         if (!/^screen:\d+:\d+$/i.test(sourceId) && !/^screen-handle:\d+$/i.test(sourceId) && !/^screen:\d+$/i.test(sourceId)) continue;
+        const altRaw = Array.isArray(row.altSourceIds) ? row.altSourceIds : [];
+        const altSourceIds = altRaw
+            .map(v => String(v))
+            .filter(v =>
+                /^screen:\d+:\d+$/i.test(v) || /^screen-handle:\d+$/i.test(v) || /^screen:\d+$/i.test(v)
+            )
+            .slice(0, 6);
         items.push({
             sourceId,
+            altSourceIds,
+            isPrimary: row.isPrimary === true,
             x: clampInt(Number(row.x), -4096, 8192),
             y: clampInt(Number(row.y), -4096, 8192),
             width: clampInt(Number(row.width), 1, 8192),
@@ -748,6 +889,35 @@ export async function configureOutput(_event: IpcMainInvokeEvent, config: unknow
     if (!outputWindow || outputWindow.isDestroyed()) return { ok: false, videos: 0, errors: ["Output window is not open"] };
     const safe = sanitizeOutputConfig(config);
     if (!safe) return { ok: false, videos: 0, errors: ["Invalid output config"] };
+
+    // Re-resolve capturer ids right before capture so Windows display_id mismatches
+    // cannot leave two tiles on the same source (secondary flicker).
+    try {
+        const screens = await listScreens(_event);
+        const used = new Set<string>();
+        for (const item of safe.items as Array<Record<string, any>>) {
+            let match = screens.find(s =>
+                (s.id === item.sourceId || (s.altIds || []).includes(item.sourceId)) && !used.has(s.id)
+            );
+            if (!match && item.expectW && item.expectH) {
+                match = screens.find(s =>
+                    !used.has(s.id) && s.width === item.expectW && s.height === item.expectH
+                );
+            }
+            if (!match) match = screens.find(s => !used.has(s.id) && !!s.isPrimary === !!item.isPrimary);
+            if (!match) match = screens.find(s => !used.has(s.id));
+            if (match) {
+                used.add(match.id);
+                item.sourceId = match.id;
+                item.altSourceIds = match.altIds || [];
+                item.isPrimary = !!match.isPrimary;
+                item.expectW = match.width;
+                item.expectH = match.height;
+                item.displayRotation = match.rotation || 0;
+            }
+        }
+    } catch { /* keep sanitized ids */ }
+
     try {
         if (pageReady) await pageReady;
     } catch (err) {

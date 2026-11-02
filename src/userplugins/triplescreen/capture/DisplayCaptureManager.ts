@@ -209,6 +209,7 @@ export class DisplayCaptureManager {
                 refreshRate: screen.refreshRate,
                 isPrimary: screen.isPrimary,
                 rotation: screen.rotation,
+                altIds: screen.altIds,
                 bounds: screen.bounds,
                 thumbnailDataUrl: screen.url
             }));

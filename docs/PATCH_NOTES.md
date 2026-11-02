@@ -4,6 +4,17 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-02 — Two-monitor secondary tile flicker
+
+### Fixed
+- **Secondary monitor glitching (even in landscape):** Windows often mismatches `desktopCapturer` `display_id` vs `screen.id`. Fallback `sources[index]` could bind **both tiles to the same capture source**, so the second tile flickered. Matching is now unique (id → aspect → remaining), ids are re-resolved on each `configureOutput`, and capture refuses to open a source already used by another tile.
+- Secondary displays capture at 30 fps for DXGI stability.
+
+### Notes
+- TripleScreen fully supports 2 monitors (and 1–N). The bug was source matching, not a 2-monitor limit.
+
+---
+
 ## 2026-11-02 — Vertical monitor flicker (in/out)
 
 ### Fixed
