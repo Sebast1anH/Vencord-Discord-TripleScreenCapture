@@ -40,7 +40,6 @@ const audioTimers = new Set<number>();
 let audioInterval = 0;
 let releaseTimer = 0;
 let onReleased: (() => void) | null = null;
-let missingConnTicks = 0;
 
 export function isNativeShareActive() {
     return ownsStream && !!activeOutputId;
@@ -50,7 +49,11 @@ export function getActiveGoLiveId() {
     return ownsStream ? activeOutputId : null;
 }
 
-/** Adapter registers so Discord stream-end can tear down Output / captures. */
+/**
+ * Optional notify when the user clearly leaves our share target.
+ * Must NOT be used for Discord's false STREAM_DELETE / missing-conn blips —
+ * those were tearing the composite down after a few seconds.
+ */
 export function setNativeShareReleaseHandler(handler: (() => void) | null) {
     onReleased = handler;
 }
@@ -62,15 +65,15 @@ function clearReleaseTimer() {
     }
 }
 
-function releaseOwnership(reason: string) {
+function dropOwnership(reason: string, notifyAdapter: boolean) {
     clearReleaseTimer();
     if (!ownsStream && !activeOutputId) return;
-    logger.info("Releasing TripleScreen go-live ownership", reason);
+    logger.info("Dropping TripleScreen go-live ownership", reason, { notifyAdapter });
     ownsStream = false;
     activeOutputId = null;
     wantAudio = false;
     clearAudioTimers();
-    missingConnTicks = 0;
+    if (!notifyAdapter) return;
     try {
         onReleased?.();
     } catch (err) {
@@ -259,14 +262,9 @@ function reinforceSystemAudio(engine: any) {
     if (!ownsStream || !activeOutputId || !engine) return;
     const state = readStreamAudioState(engine);
     if (!state) {
-        // No stream connection — do not spam setGoLiveSource (F20).
-        missingConnTicks += 1;
-        if (missingConnTicks >= 3) {
-            releaseOwnership("no stream connection");
-        }
+        // No stream connection yet / briefly gone — repair later, never tear down Output.
         return;
     }
-    missingConnTicks = 0;
     const onOurWindow = state.goLive
         && normalizeWindowSourceId(state.goLive) === normalizeWindowSourceId(activeOutputId);
     if (!wantAudio) {
@@ -286,9 +284,10 @@ function reinforceSystemAudio(engine: any) {
 }
 
 function scheduleSystemAudioKeepalive() {
-    for (const ms of [100, 250, 500, 1000, 2000, 4000, 8000]) {
+    // Sparse early pins + steady interval. Do not tear down on missing conn.
+    for (const ms of [300, 1000, 2500, 5000]) {
         scheduleAudio(() => {
-            if (!ownsStream) return;
+            if (!ownsStream || !wantAudio) return;
             reinforceSystemAudio(MediaEngineStore?.getMediaEngine?.());
         }, ms);
     }
@@ -296,7 +295,7 @@ function scheduleSystemAudioKeepalive() {
     audioInterval = window.setInterval(() => {
         if (!ownsStream) return;
         reinforceSystemAudio(MediaEngineStore?.getMediaEngine?.());
-    }, 2000);
+    }, 3000);
 }
 
 /**
@@ -326,12 +325,19 @@ export function beginNativeShare(
     clearReleaseTimer();
     activeOutputId = sourceId;
     ownsStream = true;
-    missingConnTicks = 0;
     clearAudioTimers();
 
     const applied = withBypass(() => applyGoLive(engine, sourceId, wantAudio));
-    // Keepalive always — also detects missing stream connection / wrong video target.
-    scheduleSystemAudioKeepalive();
+    if (wantAudio) scheduleSystemAudioKeepalive();
+    else {
+        // Still lightly re-pin video target if Discord steals the source.
+        for (const ms of [500, 2000]) {
+            scheduleAudio(() => {
+                if (!ownsStream || !activeOutputId) return;
+                reinforceSystemAudio(MediaEngineStore?.getMediaEngine?.());
+            }, ms);
+        }
+    }
 
     logger.info(
         "Requested Discord go live",
@@ -347,7 +353,6 @@ export function endNativeShare() {
     clearReleaseTimer();
     clearAudioTimers();
     wantAudio = false;
-    missingConnTicks = 0;
     if (!ownsStream && !activeOutputId) return;
 
     const engine = MediaEngineStore?.getMediaEngine?.();
@@ -381,19 +386,16 @@ export function installGoLiveGuard() {
             }
 
             if (source == null) {
-                // Grace: Discord often clears briefly during renegotiation (F09).
-                if (ownsStream && !releaseTimer) {
+                // Discord clears briefly during renegotiation — re-pin ours, never kill Output.
+                if (ownsStream && activeOutputId && !releaseTimer) {
                     releaseTimer = window.setTimeout(() => {
                         releaseTimer = 0;
                         if (!ownsStream || !activeOutputId) return;
                         const eng = MediaEngineStore?.getMediaEngine?.();
-                        const state = eng ? readStreamAudioState(eng) : null;
-                        if (state?.goLive) {
-                            withBypass(() => applyGoLive(eng, activeOutputId!, wantAudio));
-                            return;
-                        }
-                        releaseOwnership("setGoLiveSource(null) settled");
-                    }, 2500);
+                        if (!eng) return;
+                        logger.info("Re-pinning Output after transient setGoLiveSource(null)");
+                        withBypass(() => applyGoLive(eng, activeOutputId!, wantAudio));
+                    }, 800);
                 }
                 return originalSetGoLiveSource!.apply(this, args);
             }
@@ -406,14 +408,14 @@ export function installGoLiveGuard() {
                     ? normalizeWindowSourceId(activeOutputId)
                     : activeOutputId;
 
-                // Different non-Output window — user switched share target.
+                // Different non-Output window — user switched share target in Discord UI.
                 if (
                     normalizedNext
                     && isWindowSourceId(normalizedNext)
                     && isWindowSourceId(normalizedActive)
                     && normalizedNext !== normalizedActive
                 ) {
-                    releaseOwnership("user switched share target");
+                    dropOwnership("user switched share target", true);
                     return originalSetGoLiveSource!.apply(this, args);
                 }
 
@@ -448,20 +450,11 @@ export function installGoLiveGuard() {
 }
 
 function onStreamGone() {
+    // Discord fires STREAM_DELETE during renegotiation / quality changes.
+    // Tearing down Output here caused "crashes after a few seconds". Only the
+    // Output window close (or explicit Stop) should end the composite.
     if (!ownsStream && !activeOutputId) return;
-    // Grace then release — Discord emits false STREAM_DELETE during renegotiation.
-    if (releaseTimer) return;
-    releaseTimer = window.setTimeout(() => {
-        releaseTimer = 0;
-        if (!ownsStream) return;
-        const eng = MediaEngineStore?.getMediaEngine?.();
-        const state = eng ? readStreamAudioState(eng) : null;
-        if (state?.goLive) {
-            logger.info("Ignored transient stream-end; go-live still active", state.goLive);
-            return;
-        }
-        releaseOwnership("STREAM_DELETE/CLOSE settled");
-    }, 2500);
+    logger.info("Ignoring stream-end event while TripleScreen owns go-live");
 }
 
 export function uninstallGoLiveGuard() {

@@ -4,6 +4,13 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-03 — Stop false composite teardown after a few seconds
+
+### Fixed
+- **Composition dying after ~seconds:** Audit “stream-end” handling tore Output down on missing MediaEngine stream conn / false `STREAM_DELETE` / settled `setGoLiveSource(null)`. Those are normal Discord renegotiation blips. Composite now stays up; only Output close or Stop ends it. Transient `null` re-pins the Output window instead of releasing.
+
+---
+
 ## 2026-11-02 — Full audit fixes (identity, go-live, park, tiles)
 
 ### Fixed

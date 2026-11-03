@@ -25,8 +25,8 @@ TripleScreen composites selected monitors into an Output `BrowserWindow` and poi
 | F05 | High | **Fixing** | Held last-frame prevented reconnect forever after DXGI drop. |
 | F06 | High | **Fixing** | Delayed re-`beginNativeShare` (400/1200/3000) restarts capture. |
 | F07 | High [verify] | Open | Parked/occluded Output may stall Chromium compositing. |
-| F08 | High | **Fixing** | `STREAM_DELETE` ignored; Output keeps running after Discord stops. |
-| F09 | Medium | **Fixing** | Transient `setGoLiveSource(null)` dropped ownership immediately. |
+| F08 | High | **Reverted teardown** | Auto-stop on `STREAM_DELETE` / missing conn caused crashes after seconds. Output close / Stop remain the teardown path; Discord stop may leave Output until user closes it. |
+| F09 | Medium | **Fixed (re-pin)** | Transient `setGoLiveSource(null)` re-pins Output; does not kill composite. |
 | F10 | Medium | Open | `listScreens` on every layout drag (thumbnail cost). |
 | F11 | Medium | **Fixing** | Alt-id fallbacks pointed at other monitors. |
 | F12 | Medium | **Fixing** | Minimize→restore flash; park snaps corner (keep uniform scale). |
