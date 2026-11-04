@@ -4,11 +4,19 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-04 — Honor selected FPS while streaming
+
+### Fixed
+- **Stream FPS dropped when Output was parked/occluded:** Paint loop throttled to ≤5 fps while hidden, so Discord’s window capture followed that. While a stream config is active, composition now keeps the user-selected FPS (15/30/60).
+- **60 FPS selection ignored:** Output sanitize, capture `maxFrameRate`, and paint clamp were hard-capped at 30; they now allow up to 60 to match the settings UI.
+
+---
+
 ## 2026-11-04 — Long-run / inactive composition performance
 
 ### Fixed
 - **Perf death after idle/occlusion:** Hidden Output muted desktop tracks; stall watchdog force-reopened DXGI every ~2s. Reconnect now skips while hidden, uses exponential backoff, and only force-reopens on track `ended`. Soft wake on `visibilitychange`.
-- **Long-session GPU load:** Capture capped to mosaic-sized max edge (≤2560) at 30 fps; hold-frame buffers downscaled to 1280; paint drops to ≤5 fps while hidden; disabled `desynchronized` canvas; screen-list cache 15s to avoid thumbnail thrash on layout edits.
+- **Long-session GPU load:** Capture capped to mosaic-sized max edge (≤2560); hold-frame buffers downscaled to 1280; idle (non-streaming) paint may drop to ≤5 fps while hidden; disabled `desynchronized` canvas; screen-list cache 15s to avoid thumbnail thrash on layout edits.
 
 ---
 

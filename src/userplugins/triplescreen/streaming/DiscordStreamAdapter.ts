@@ -119,7 +119,7 @@ export class DiscordStreamAdapter {
             this.compositor = new Compositor({
                 width: output.width,
                 height: output.height,
-                frameRate: Math.min(30, fps),
+                frameRate: fps,
                 backgroundColor: activeLayout.backgroundColor || outputSettings.backgroundColor,
                 backgroundImageDataUrl: outputSettings.backgroundImageDataUrl,
                 backgroundImageFit: outputSettings.backgroundImageFit,

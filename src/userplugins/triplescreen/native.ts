@@ -508,8 +508,8 @@ async function ensureVideo(id) {
       throw new Error("mediaDevices unavailable in output page (bad origin)");
     }
     const item = (cfg && (cfg.items || []).find(i => i.sourceId === id)) || null;
-    // Cap all monitors at 30fps — 60 burns GPU over long sessions and worsens DXGI instability.
-    const maxFps = 30;
+    // Honor user-selected stream FPS (15/30/60). DXGI may still deliver less on some displays.
+    const maxFps = Math.max(1, Math.min(60, Number(cfg && cfg.fps) || targetFps || 30));
     const candidates = [...new Set([
       id,
       ...((item && item.altSourceIds) || [])
@@ -663,11 +663,15 @@ function draw() {
 }
 // setInterval keeps painting when covered; rAF stalls when occluded. Honor cfg.fps.
 function armDraw(fps) {
-  targetFps = Math.max(1, Math.min(30, Number(fps) || 30));
+  targetFps = Math.max(1, Math.min(60, Number(fps) || 30));
   if (drawTimer) clearInterval(drawTimer);
-  // Hidden/occluded: paint hold frames slowly so Discord still sees something without burning GPU.
-  const rate = pageVisible ? targetFps : Math.min(5, targetFps);
-  drawTimer = setInterval(draw, Math.max(16, Math.round(1000 / rate)));
+  // While streaming (cfg active), keep the user-selected FPS even if the Output page is
+  // occluded/parked — Discord is capturing this window and must see full-rate frames.
+  // Idle preview with no cfg may throttle when hidden.
+  const streaming = !!(cfg && (cfg.items || []).length);
+  const rate = (streaming || pageVisible) ? targetFps : Math.min(5, targetFps);
+  const minMs = targetFps > 30 ? 8 : 16;
+  drawTimer = setInterval(draw, Math.max(minMs, Math.round(1000 / rate)));
 }
 armDraw(30);
 
@@ -974,7 +978,7 @@ function sanitizeOutputConfig(config: unknown) {
     return {
         width: clampInt(Number(raw.width), 320, 2560),
         height: clampInt(Number(raw.height), 180, 1440),
-        fps: clampInt(Number(raw.fps), 1, 30),
+        fps: clampInt(Number(raw.fps), 1, 60),
         background: typeof raw.background === "string" && /^#[0-9a-fA-F]{6}$/.test(raw.background)
             ? raw.background
             : "#000000",
