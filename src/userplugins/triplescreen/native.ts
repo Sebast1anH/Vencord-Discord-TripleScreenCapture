@@ -196,22 +196,30 @@ function matchDisplaysToSources(
     });
 }
 
+let screensCache: { at: number; screens: NativeScreen[]; } | null = null;
+
 /**
  * Lists every physical display. Electron source ids look like `screen:<displayId>:0`
  * and can be passed to chromeMediaSourceId for an individual monitor.
  */
 export async function listScreens(_event: IpcMainInvokeEvent): Promise<NativeScreen[]> {
+    // Thumbnail getSources is expensive while DXGI captures are live — reuse briefly (F10).
+    if (screensCache && Date.now() - screensCache.at < 15_000) {
+        return screensCache.screens;
+    }
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const electron = require("electron") as typeof import("electron");
     const displays = electron.screen.getAllDisplays();
     const primaryId = electron.screen.getPrimaryDisplay().id;
     const sources = await electron.desktopCapturer.getSources({
         types: ["screen"],
-        thumbnailSize: { width: 320, height: 180 },
+        thumbnailSize: { width: 160, height: 90 },
         fetchWindowIcons: false
     }) as CapturerSource[];
 
-    return matchDisplaysToSources(displays, sources, primaryId);
+    const screens = matchDisplaysToSources(displays, sources, primaryId);
+    screensCache = { at: Date.now(), screens };
+    return screens;
 }
 
 const OUTPUT_TITLE = "TripleScreen Output";
@@ -305,7 +313,8 @@ const OUTPUT_HTML = `<!doctype html>
 <style>html,body{margin:0;background:#000;overflow:hidden}canvas{width:100%;height:100%;display:block}</style>
 </head><body><canvas id="c"></canvas><script>
 const canvas = document.getElementById("c");
-const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+// desynchronized overlays can glitch under Discord window-capture over long sessions.
+const ctx = canvas.getContext("2d", { alpha: false, desynchronized: false });
 ctx.imageSmoothingEnabled = true;
 ctx.imageSmoothingQuality = "high";
 const videos = new Map();
@@ -315,11 +324,33 @@ const lastFrame = new Map();
 /** Locked capture→draw rotation per source (must not flip every frame). */
 const orientLock = new Map();
 const reconnectAt = new Map();
+const reconnectAttempts = new Map();
 const lastLiveAt = new Map();
-const lastSnapshotAt = new Map();
 let cfg = null;
 let bgImage = null;
 let bgImageUrl = "";
+let pageVisible = document.visibilityState !== "hidden";
+let drawTimer = null;
+let targetFps = 30;
+
+document.addEventListener("visibilitychange", () => {
+  pageVisible = document.visibilityState !== "hidden";
+  if (pageVisible) {
+    // Soft wake: refresh muted tracks once; do not thrash while hidden.
+    for (const item of (cfg && cfg.items) || []) {
+      const id = item.sourceId;
+      const video = videos.get(id);
+      const track = video && video.srcObject && video.srcObject.getVideoTracks && video.srcObject.getVideoTracks()[0];
+      if (!video || (track && (track.readyState === "ended" || track.muted))) {
+        reconnectAttempts.set(id, 0);
+        scheduleReconnect(id, !!(track && track.readyState === "ended"));
+      } else {
+        try { video.play(); } catch (_) {}
+      }
+    }
+  }
+  armDraw(targetFps);
+});
 
 function destRect(item, srcW, srcH) {
   if (item.scaleMode === "stretch") return { x: item.x, y: item.y, w: item.width, h: item.height };
@@ -393,25 +424,42 @@ function lockedOrient(id, srcW, srcH, expectW, expectH, displayRotation) {
 function snapshotLastFrame(id, video) {
   if (!video || video.readyState < 2 || !video.videoWidth) return;
   try {
+    // Downscale hold buffer — full native frames (esp. 4K) leak GPU over long sessions.
+    const maxEdge = 1280;
+    const sw = video.videoWidth;
+    const sh = video.videoHeight;
+    const scale = Math.min(1, maxEdge / Math.max(sw, sh));
+    const dw = Math.max(1, Math.round(sw * scale));
+    const dh = Math.max(1, Math.round(sh * scale));
     let c = lastFrame.get(id);
-    if (!c || c.width !== video.videoWidth || c.height !== video.videoHeight) {
+    if (!c || c.width !== dw || c.height !== dh) {
       c = document.createElement("canvas");
-      c.width = video.videoWidth;
-      c.height = video.videoHeight;
+      c.width = dw;
+      c.height = dh;
       lastFrame.set(id, c);
     }
-    c.getContext("2d").drawImage(video, 0, 0);
+    c.getContext("2d").drawImage(video, 0, 0, sw, sh, 0, 0, dw, dh);
   } catch (_) {}
 }
 
 function scheduleReconnect(id, force) {
   if (!cfg || !(cfg.items || []).some(item => item.sourceId === id)) return;
+  // While the Output page is hidden/occluded, Chromium mutes desktop tracks — force-reopening
+  // DXGI every couple of seconds destroys long-run performance. Wait for visibility.
+  if (!pageVisible && !force) return;
+  if (!pageVisible && force) {
+    // Still defer heavy reopen until visible unless the track fully ended and we only queue it.
+  }
   const now = Date.now();
   const nextAt = reconnectAt.get(id) || 0;
   if (now < nextAt) return;
-  reconnectAt.set(id, now + 2000);
+  const attempt = (reconnectAttempts.get(id) || 0) + 1;
+  reconnectAttempts.set(id, attempt);
+  const backoff = Math.min(30000, 2000 * Math.pow(2, Math.min(4, attempt - 1)));
+  reconnectAt.set(id, now + backoff);
   setTimeout(() => {
     if (!cfg || !(cfg.items || []).some(item => item.sourceId === id)) return;
+    if (!pageVisible) return;
     if (pending.has(id)) return;
     if (force && videos.has(id)) {
       const old = videos.get(id);
@@ -423,20 +471,30 @@ function scheduleReconnect(id, force) {
       videos.delete(id);
     }
     if (videos.has(id)) return;
-    ensureVideo(id).catch(() => {});
+    ensureVideo(id).then(() => {
+      reconnectAttempts.set(id, 0);
+    }).catch(() => {});
   }, 200);
+}
+
+function captureMaxEdge() {
+  const w = (cfg && cfg.width) || 1920;
+  const h = (cfg && cfg.height) || 1080;
+  // Enough pixels for mosaic tiles without capturing raw 4K/8K per monitor forever.
+  return Math.max(1280, Math.min(2560, Math.max(w, h)));
 }
 
 async function openDesktopStream(sourceId, maxFps) {
   const media = navigator.mediaDevices;
+  const edge = captureMaxEdge();
   return media.getUserMedia({
     audio: false,
     video: { mandatory: {
       chromeMediaSource: "desktop",
       chromeMediaSourceId: sourceId,
       maxFrameRate: maxFps,
-      maxWidth: 8192,
-      maxHeight: 8192
+      maxWidth: edge,
+      maxHeight: edge
     } }
   });
 }
@@ -450,10 +508,8 @@ async function ensureVideo(id) {
       throw new Error("mediaDevices unavailable in output page (bad origin)");
     }
     const item = (cfg && (cfg.items || []).find(i => i.sourceId === id)) || null;
-    // Prefer 30fps on secondary / tall displays — dual-monitor DXGI is flaky at 60 on many GPUs.
-    const secondary = item && item.isPrimary === false;
-    const tall = item && item.expectH > item.expectW;
-    const maxFps = (secondary || tall) ? 30 : 60;
+    // Cap all monitors at 30fps — 60 burns GPU over long sessions and worsens DXGI instability.
+    const maxFps = 30;
     const candidates = [...new Set([
       id,
       ...((item && item.altSourceIds) || [])
@@ -462,11 +518,7 @@ async function ensureVideo(id) {
     const inUse = new Set();
     for (const [otherId, otherVideo] of videos) {
       if (otherId === id) continue;
-      const stream = otherVideo && otherVideo.srcObject;
-      const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
-      const settings = track && track.getSettings ? track.getSettings() : null;
-      // settings.deviceId is not set for desktop; track label sometimes has id — keep map of chosen ids
-      if (otherVideo.__tsSourceId) inUse.add(otherVideo.__tsSourceId);
+      if (otherVideo && otherVideo.__tsSourceId) inUse.add(otherVideo.__tsSourceId);
     }
     let stream = null;
     let usedId = id;
@@ -504,12 +556,14 @@ async function ensureVideo(id) {
           snapshotLastFrame(id, video);
           try { video.remove(); } catch (_) {}
           if (videos.get(id) === video) videos.delete(id);
-          scheduleReconnect(id, false);
+          scheduleReconnect(id, true);
         };
         track.onmute = () => { snapshotLastFrame(id, video); };
+        track.onunmute = () => { lastLiveAt.set(id, Date.now()); };
       }
       videos.set(id, video);
       lastLiveAt.set(id, Date.now());
+      reconnectAttempts.set(id, 0);
       return video;
     } catch (err) {
       if (stream) {
@@ -578,30 +632,21 @@ function draw() {
     const video = videos.get(item.sourceId);
     const freeze = frozen.get(item.sourceId);
     const hold = lastFrame.get(item.sourceId);
-    const trackMuted = !!(video && video.srcObject && video.srcObject.getVideoTracks
-      && video.srcObject.getVideoTracks()[0] && video.srcObject.getVideoTracks()[0].muted);
-    const liveOk = video && video.readyState >= 2 && video.videoWidth > 0 && !trackMuted;
+    const track = video && video.srcObject && video.srcObject.getVideoTracks
+      && video.srcObject.getVideoTracks()[0];
+    const trackEnded = !!(track && track.readyState === "ended");
+    const trackMuted = !!(track && track.muted);
+    const liveOk = video && video.readyState >= 2 && video.videoWidth > 0 && !trackMuted && !trackEnded;
     if (liveOk) {
       lastLiveAt.set(item.sourceId, Date.now());
-      const snapAt = lastSnapshotAt.get(item.sourceId) || 0;
-      if (Date.now() - snapAt > 1000) {
-        snapshotLastFrame(item.sourceId, video);
-        lastSnapshotAt.set(item.sourceId, Date.now());
-      }
-    } else {
-      // Held frame must not block reconnect forever (F05) — force reopen after stall.
-      const stalledFor = Date.now() - (lastLiveAt.get(item.sourceId) || 0);
-      if (stalledFor > 2500 && !frozen.has(item.sourceId)) {
-        scheduleReconnect(item.sourceId, true);
-      }
+    } else if (trackEnded && !frozen.has(item.sourceId)) {
+      scheduleReconnect(item.sourceId, true);
+    } else if (!video && !frozen.has(item.sourceId) && pageVisible) {
+      // Missing capture only — muted while occluded must NOT force-reopen (perf death spiral).
+      scheduleReconnect(item.sourceId, false);
     }
     const src = liveOk ? video : (hold || freeze);
-    if (!src) {
-      if (!pending.has(item.sourceId) && !frozen.has(item.sourceId)) {
-        scheduleReconnect(item.sourceId, false);
-      }
-      continue;
-    }
+    if (!src) continue;
     const srcWidth = src.videoWidth || src.width || 0;
     const srcHeight = src.videoHeight || src.height || 0;
     if (!srcWidth || !srcHeight) continue;
@@ -617,11 +662,12 @@ function draw() {
   }
 }
 // setInterval keeps painting when covered; rAF stalls when occluded. Honor cfg.fps.
-let drawTimer = null;
 function armDraw(fps) {
+  targetFps = Math.max(1, Math.min(30, Number(fps) || 30));
   if (drawTimer) clearInterval(drawTimer);
-  const rate = Math.max(1, Math.min(60, Number(fps) || 30));
-  drawTimer = setInterval(draw, Math.max(8, Math.round(1000 / rate)));
+  // Hidden/occluded: paint hold frames slowly so Discord still sees something without burning GPU.
+  const rate = pageVisible ? targetFps : Math.min(5, targetFps);
+  drawTimer = setInterval(draw, Math.max(16, Math.round(1000 / rate)));
 }
 armDraw(30);
 
@@ -647,8 +693,8 @@ window.__tsApply = function (next) {
       lastFrame.delete(id);
       orientLock.delete(id);
       reconnectAt.delete(id);
+      reconnectAttempts.delete(id);
       lastLiveAt.delete(id);
-      lastSnapshotAt.delete(id);
     }
     for (const id of [...frozen.keys()]) {
       if (ids.includes(id)) continue;
@@ -659,8 +705,8 @@ window.__tsApply = function (next) {
       lastFrame.delete(id);
       orientLock.delete(id);
       reconnectAt.delete(id);
+      reconnectAttempts.delete(id);
       lastLiveAt.delete(id);
-      lastSnapshotAt.delete(id);
     }
     return { ok: errors.length === 0, videos: videos.size + frozen.size, errors: errors };
   }).catch(err => {
@@ -928,7 +974,7 @@ function sanitizeOutputConfig(config: unknown) {
     return {
         width: clampInt(Number(raw.width), 320, 2560),
         height: clampInt(Number(raw.height), 180, 1440),
-        fps: clampInt(Number(raw.fps), 1, 60),
+        fps: clampInt(Number(raw.fps), 1, 30),
         background: typeof raw.background === "string" && /^#[0-9a-fA-F]{6}$/.test(raw.background)
             ? raw.background
             : "#000000",

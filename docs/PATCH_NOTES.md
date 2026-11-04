@@ -4,6 +4,14 @@ Newest entries first. Each GitHub push for a fix should add a section here and m
 
 ---
 
+## 2026-11-04 — Long-run / inactive composition performance
+
+### Fixed
+- **Perf death after idle/occlusion:** Hidden Output muted desktop tracks; stall watchdog force-reopened DXGI every ~2s. Reconnect now skips while hidden, uses exponential backoff, and only force-reopens on track `ended`. Soft wake on `visibilitychange`.
+- **Long-session GPU load:** Capture capped to mosaic-sized max edge (≤2560) at 30 fps; hold-frame buffers downscaled to 1280; paint drops to ≤5 fps while hidden; disabled `desynchronized` canvas; screen-list cache 15s to avoid thumbnail thrash on layout edits.
+
+---
+
 ## 2026-11-03 — Stop false composite teardown after a few seconds
 
 ### Fixed
